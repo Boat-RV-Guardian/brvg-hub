@@ -233,17 +233,6 @@ check "wan_kind: repeater client" "wifi" "$(wan_kind apcli0)"
 check "wan_kind: ap radio counts as wifi" "wifi" "$(wan_kind wlan1)"
 check "wan_kind: unknown is excluded" "other" "$(wan_kind tun0)"
 
-# --- hub watchdog decision (fail open rather than leave the vessel silent) ---
-# healthy fails threshold released -> decision
-check "watchdog: healthy and never released ⇒ nothing" none "$(watch_decide 1 0 5 0)"
-check "watchdog: healthy after a release ⇒ recover" recover "$(watch_decide 1 0 5 1)"
-check "watchdog: below the threshold ⇒ wait" none "$(watch_decide 0 4 5 0)"
-check "watchdog: at the threshold ⇒ release" release "$(watch_decide 0 5 5 0)"
-check "watchdog: past the threshold ⇒ release" release "$(watch_decide 0 9 5 0)"
-# The one that matters: never release twice. A second release would re-run the firewall reload
-# every tick for as long as the hub stays down.
-check "watchdog: already released ⇒ never release again" none "$(watch_decide 0 99 5 1)"
-
 # --- release_lockdown against a stand-in uci -------------------------------------------------
 # The real thing needs a router; this proves the REVERSE-INDEX deletion is right (uci renumbers on
 # every delete, so forward iteration silently skips rules) and that a hand-written rule survives.
@@ -269,7 +258,7 @@ printf 'brvg_lk_allow_0\nbrvg_lk_allow_1\nmy_custom_rule\nbrvg_lk_deny\n' > "$_u
 out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; release_lockdown >/dev/null 2>&1 && echo released' 2>/dev/null)
 check "release_lockdown: reports success when rules existed" "released" "$out"
 check "release_lockdown: removes ONLY brvg_lk_* (hand-written rules survive)" "my_custom_rule" "$(cat "$_uci_dir/db")"
-# With nothing of ours applied it must report false, so the watchdog doesn't claim a release.
+# With nothing of ours applied it must report false, a release must never be claimed when nothing was applied.
 printf 'my_custom_rule\n' > "$_uci_dir/db"
 out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; release_lockdown >/dev/null 2>&1 && echo released || echo nothing' 2>/dev/null)
 check "release_lockdown: nothing of ours ⇒ reports nothing to release" "nothing" "$out"

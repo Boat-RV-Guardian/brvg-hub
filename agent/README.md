@@ -156,25 +156,16 @@ confirm `uhttpd` is present on a FACTORY-RESET X750 (it was present on the bench
 had packages added); if not stock, it becomes a `Depends:` in the .ipk.
 
 
-## Hub watchdog — failing open instead of going silent
+## Lockdown fails closed (owner, 2026-08-17)
 
-Owner decision 2026-08-13. Under a *traffic* lockdown the hub is the only route to the cloud. If
-the hub runs on this router that is fine — a dead router is a dead gateway either way — but a hub
-on a **separate** box (Pi, Docker, desktop) can die while the router routes happily, and then the
-vessel is silent with no remote way back in.
+There is deliberately **no watchdog** that releases lockdown when a separate-box hub dies. Lockdown
+is SIM-usage control, not a security posture; most hubs run ON the router (coinciding failure
+domains), and a dead off-router hub means a silent vessel until the connectivity-offline alert
+summons a human. (A fail-open watchdog shipped briefly and was removed the same week — agent 0.6.0.)
 
-Set `HUB_WATCH_URL` to the hub's `/healthz` and the router will watch it. After `HUB_WATCH_FAILS`
-consecutive failures it **removes the lockdown rules** so sensors can reach the cloud directly
-again, and sends `hub.offline` so you hear about it. When the hub returns it sends `hub.online`.
-
-It deliberately does **not** re-arm the lockdown on recovery: a hub that restarts every few minutes
-would flap the firewall, and every apply is a ~10 s reload. The released state is announced;
-re-applying is one tap in the app.
-
-The `brvg_lk_` rule-name prefix is the shared contract between this watchdog and the app's SSH
-enforcement — both manage the same rules by matching that prefix, which is how two languages stay
-in step without sharing code.
-
+The `brvg_lk_` rule-name prefix remains the shared contract between the app's SSH enforcement and
+the agent's `release_lockdown` (kept for the typed command channel) — both manage the same rules by
+matching that prefix, which is how two languages stay in step without sharing code.
 
 ## WAN usage accounting
 
@@ -193,9 +184,8 @@ meters. These interface counters answer the different question — *where* the b
 what makes the Wi-Fi uplink and the roll-up measurable rather than merely plausible. Cross-checked
 on the bench: QGDCNT and `wwan0` agree to ~1% over 14 h.
 
-## Hub watchdog and hub health
+## Hub health
 
-`HUB_WATCH_URL` should point at the hub's `/healthz`. That endpoint reports **delivery**, not just
-liveness: it answers 503 once the hub has failed several consecutive drains, so a hub that is
-running but cannot reach the cloud still trips the watchdog and releases the lockdown. A hub whose
-web server is up while nothing is being delivered is precisely the case fail-open exists for.
+The hub's `/healthz` reports **delivery**, not just liveness: it answers 503 once the hub has
+failed several consecutive drains, so a container healthcheck (or the app) can tell "web server up"
+from "actually delivering to the cloud".

@@ -15,10 +15,10 @@ export const HUB_VERSION = '0.5.0';
 /**
  * Consecutive failed drains before /healthz reports UNHEALTHY (503).
  *
- * This is what the router's fail-open watchdog actually keys off, so the threshold is deliberately
- * generous: at the default 120 s drain interval this is ~10 minutes of sustained failure, and the
- * watchdog then wants several consecutive failed probes of its own on top. A WAN blip must not
- * disarm someone's lockdown; a genuinely broken hub must.
+ * Deliberately generous: at the default 120 s drain interval this is ~10 minutes of sustained
+ * failure. Consumers are container/systemd healthchecks and the app — a WAN blip must not flap
+ * them; a genuinely broken hub must trip them. (The router-side fail-open watchdog this once fed
+ * was removed 2026-08-17 — lockdown fails closed.)
  */
 export const DELIVERY_UNHEALTHY_AFTER = 5;
 
@@ -36,9 +36,8 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
     const url = new URL(req.url || '/', 'http://localhost');
     // Answer the sleepy sensor FIRST — it is awake on borrowed battery. Work happens after.
     if (url.pathname === '/healthz') {
-      // Report on DELIVERY, not just liveness. A 200 here tells the router's watchdog the vessel
-      // is still being heard from; answering 200 while every drain fails would leave a lockdown
-      // armed around a hub that cannot deliver — the exact situation fail-open exists for.
+      // Report on DELIVERY, not just liveness: answering 200 while every drain fails would make
+      // a hub that cannot deliver look healthy to every healthcheck watching it.
       const failures = agg.consecutiveFailures;
       const delivering = failures < DELIVERY_UNHEALTHY_AFTER;
       res.writeHead(delivering ? 200 : 503, { 'Content-Type': 'application/json' });
