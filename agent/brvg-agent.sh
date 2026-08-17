@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.9.0"
+AGENT_VERSION="0.9.1"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -909,18 +909,28 @@ wan_active_iface() {
   ip route show default 2>/dev/null | awk '/^default/ { for (i=1;i<=NF;i++) if ($i=="dev") { print $(i+1); exit } }'
 }
 
-# Emit "&wan_cellular=<mb>&wan_wifi=<mb>..." for the interfaces that moved since last tick, plus
-# the active source. Only NON-ZERO deltas are sent — a boat on Wi-Fi shouldn't pay for a cellular
-# field that says 0 on every report.
+# LAN-side guard: an interface enslaved to a bridge carries LOCAL client traffic, not WAN bytes.
+# Bench GL-X750 2026-08-17: wlan0/wlan1 are the router's own APs (Mode: Master) and sit in br-lan
+# alongside the eth1 LAN port — all three expose sysfs `brport`; the true WAN faces (wwan0, eth0)
+# do not. A repeater/STA uplink is the wan interface of its firewall zone, never a br-lan member,
+# so it still counts. $1 = the /sys/class/net/<if> path.
+wan_lan_side() { [ -e "$1/brport" ]; }
+
+# Emit "&wanKb_cellular=<kb>&wanKb_wifi=<kb>..." for the SOURCES that moved since last tick, plus
+# the active source. One param per kind — two radios both classifying as wifi used to emit
+# `wanKb_wifi` twice (seen live 2026-08-17), and the wire contract has no duplicate keys. Only
+# NON-ZERO totals are sent — a boat on Wi-Fi shouldn't pay for a cellular field that says 0.
 collect_wan_usage() {
   mkdir -p "$WAN_STATE_DIR" 2>/dev/null
   _out=""
   _active=$(wan_active_iface)
   [ -n "$_active" ] && _out="&wanSrc=$(wan_kind "$_active")"
+  _kb_cellular=0; _kb_wired=0; _kb_wifi=0
   for _path in /sys/class/net/*; do
     [ -e "$_path" ] || continue                           # no match ⇒ the glob stayed literal
     _if=$(basename "$_path")
-    case "$_if" in lo|br-*|eth1) continue ;; esac         # loopback, the LAN bridge, LAN ports
+    case "$_if" in lo|br-*) continue ;; esac              # loopback, the LAN bridge itself
+    wan_lan_side "$_path" && continue                     # bridge ports: AP radios + LAN ports
     _kind=$(wan_kind "$_if")
     [ "$_kind" = "other" ] && continue                    # only WAN-side media
     _cur=$(wan_bytes "$_if") || continue
@@ -930,8 +940,15 @@ collect_wan_usage() {
     echo "$_cur" > "$_f"
     # Report in KB: MB loses a slow trickle entirely, raw bytes waste URL length every tick.
     _kb=$(( _d / 1024 ))
-    [ "$_kb" -gt 0 ] && _out="$_out&wanKb_${_kind}=${_kb}"
+    case "$_kind" in
+      cellular) _kb_cellular=$(( _kb_cellular + _kb )) ;;
+      wired)    _kb_wired=$(( _kb_wired + _kb )) ;;
+      wifi)     _kb_wifi=$(( _kb_wifi + _kb )) ;;
+    esac
   done
+  [ "$_kb_cellular" -gt 0 ] && _out="$_out&wanKb_cellular=${_kb_cellular}"
+  [ "$_kb_wired" -gt 0 ] && _out="$_out&wanKb_wired=${_kb_wired}"
+  [ "$_kb_wifi" -gt 0 ] && _out="$_out&wanKb_wifi=${_kb_wifi}"
   printf '%s' "$_out"
 }
 

@@ -41,10 +41,12 @@ install -m 0755 "$SRC/hub-lite-cgi.sh" "$WORK/data/www/brvg/cgi-bin/report"
 
 # NOTE: no config file ships in the package. The config carries this device's token and is written
 # by the app at enrollment; packaging a placeholder would risk overwriting a live one on upgrade.
+# uhttpd serves the hub-lite CGI receiver and is NOT stock on GL.iNet firmware (bench GL-X750
+# 4.3.28 ships nginx only) — opkg pulls it at install, which needs router internet.
 cat > "$WORK/control/control" <<EOF
 Package: $PKG
 Version: $VERSION
-Depends: libc, curl
+Depends: libc, curl, uhttpd
 Section: net
 Architecture: $ARCH
 Maintainer: Boat & RV Guardian

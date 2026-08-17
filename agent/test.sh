@@ -233,6 +233,15 @@ check "wan_kind: repeater client" "wifi" "$(wan_kind apcli0)"
 check "wan_kind: ap radio counts as wifi" "wifi" "$(wan_kind wlan1)"
 check "wan_kind: unknown is excluded" "other" "$(wan_kind tun0)"
 
+# LAN-side exclusion: a bridge port (sysfs `brport`) is local traffic — the bench GL-X750's own AP
+# radios were being billed as WAN wifi usage (and emitted wanKb_wifi TWICE, one per radio).
+_fakeif=$(mktemp -d)
+mkdir -p "$_fakeif/brport"
+check "wan_lan_side: a bridge port is LAN-side" "yes" "$(wan_lan_side "$_fakeif" && echo yes || echo no)"
+rm -rf "$_fakeif/brport"
+check "wan_lan_side: a plain WAN face is not" "no" "$(wan_lan_side "$_fakeif" && echo yes || echo no)"
+rm -rf "$_fakeif"
+
 # --- hub watchdog decision (fail open rather than leave the vessel silent) ---
 # healthy fails threshold released -> decision
 check "watchdog: healthy and never released ⇒ nothing" none "$(watch_decide 1 0 5 0)"
