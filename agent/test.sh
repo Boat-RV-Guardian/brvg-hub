@@ -302,6 +302,16 @@ out=$(printf '{"commands":[{"id":"l1","cmd":"lockdown_on"},{"id":"l2","cmd":"loc
 check "commands: lockdown verbs parse" "l1:lockdown_on
 l2:lockdown_off" "$out"
 
+# --- parse_cradlepoint_gps (NCOS /api/status/gps, bench-captured DMS shape 2026-08-17) -------
+out=$(printf '{"success":true,"data":{"fix":{"latitude":{"degree":41,"minute":29,"second":34.52214},"longitude":{"degree":-81,"minute":43,"second":30.324},"satellites":9}}}' | parse_cradlepoint_gps)
+check "cradlepoint gps: DMS with sign on degree parses to %.5f decimals" "41.49292 -81.72509" "$out"
+out=$(printf '{"success":true,"data":{"fix":{"latitude":{"degree":0,"minute":0,"second":0},"longitude":{"degree":0,"minute":0,"second":0}}}}' | parse_cradlepoint_gps)
+check "cradlepoint gps: the 0,0 no-fix placeholder yields nothing" "" "$out"
+out=$(printf '{"success":false,"reason":"unauthorized"}' | parse_cradlepoint_gps)
+check "cradlepoint gps: an error envelope yields nothing" "" "$out"
+out=$(printf 'not json at all' | parse_cradlepoint_gps)
+check "cradlepoint gps: garbage yields nothing" "" "$out"
+
 # --- version reporting + update verbs ---
 # `--version` must work with no config: the self-update smoke check runs it on a freshly installed
 # agent, before that agent has ever been configured.

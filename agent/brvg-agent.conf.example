@@ -21,8 +21,21 @@ WORKER_URL="https://api.boatrvguardian.com"
 GPS_INTERVAL=120
 MODEM_INTERVAL=600
 
-# GPS source: auto (GL.iNet → modem AT; else gpsd if present; else NMEA serial), at, gpsd, nmea.
+# GPS source: auto (GL.iNet → modem AT; else gpsd if present; else NMEA serial), at, gpsd, nmea,
+# tcp (NMEA over the network — chartplotter/AIS/gpsd serving on a LAN port), or cradlepoint
+# (poll a Cradlepoint NCOS router's local HTTP API — the router is never configured to push).
 GPS_SOURCE=auto
+
+# For GPS_SOURCE=tcp: the LAN NMEA server to dial (the agent is always the client).
+GPS_HOST=""
+GPS_PORT=10110
+
+# For GPS_SOURCE=cradlepoint: the router's LAN address + admin credential (same names as the
+# TypeScript hub's env, so one enrollment config drives either tier).
+CRADLEPOINT_HOST=""
+CRADLEPOINT_PORT=80
+CRADLEPOINT_USER=admin
+CRADLEPOINT_PASSWORD=""
 
 # Modem AT port. GL-X750: /dev/ttyUSB2. X3000-class (PCIe RM520): check `ls /dev/mhi_*` — see
 # agent/README.md. Leave as-is on a Pi with no cellular HAT (modem telemetry is skipped).

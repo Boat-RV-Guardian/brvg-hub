@@ -90,6 +90,18 @@ dongle is normally plugged in later, and opkg needs the router online at the mom
 
 Pin it explicitly with `GPS_SOURCE=nmea` + `GPS_DEVICE=/dev/ttyACM0` if auto-detection picks wrong.
 
+Two network sources join the chain (2026-08-17, GPS parity with the hub — explicit choices, never
+part of `auto`):
+
+- **`GPS_SOURCE=tcp`** + `GPS_HOST`/`GPS_PORT` — NMEA 0183 served on the LAN (chartplotter, AIS,
+  gpsd). The agent dials in, reads a burst, and reuses the same RMC parser as the serial path.
+  ⚠️ Uses busybox `nc`; verify it exists on FACTORY-STOCK firmware before shipping (the same trap
+  as the manually-installed Lua on the bench box).
+- **`GPS_SOURCE=cradlepoint`** + `CRADLEPOINT_HOST`/`_PORT`/`_USER`/`_PASSWORD` — poll a
+  Cradlepoint NCOS router's local `/api/status/gps` over HTTP Basic auth (same env names as the
+  TypeScript hub). The router is POLLED, never configured to push anywhere; the DMS payload shape
+  is pinned to a bench capture (CBA850 fw 7.0.50).
+
 ### How the position actually reaches the app
 
 **The agent reads the dongle itself.** `GPS_SOURCE=auto` (the default the app writes) tries the
