@@ -1,5 +1,5 @@
 #!/bin/sh
-# BRVG phone-home agent — Phase A skeleton (brvg-internal/docs/ROUTER-PHONE-HOME.md).
+# BRVG phone-home agent — Phase A skeleton (telemetry push; the command channel is Phase B).
 #
 # One POSIX-shell agent, two homes: a GL.iNet router (busybox ash, AT commands straight to the
 # modem port — the agent runs as root on-device, so no RPC login is needed) and a Raspberry
@@ -109,8 +109,7 @@ urlencode_spaces() { printf '%s' "$1" | sed 's/ /%20/g; s/&/%26/g'; }
 # wrong — a mains sensor reuses TLS sessions and costs ~551 B per report, not the ~5 KB a fresh
 # handshake would. The roll-up saves tens of MB/month across a few sensors: worth having, not an
 # order of magnitude. The relay's real justification is LOCKDOWN — sensors that hand off on the LAN
-# need no WAN egress, so the forward chain can be deny-all with no allow rules. See
-# brvg-internal/docs/HUB-PROXY.md.
+# need no WAN egress, so the forward chain can be deny-all with no allow rules.
 
 # Spool lines (epoch	device	event	rawquery) → the JSON items array, deduped per device+event
 # KEEPING THE NEWEST (a later line overwrites — the spool is append-ordered). stdout: one line,

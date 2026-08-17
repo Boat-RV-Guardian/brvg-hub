@@ -15,7 +15,7 @@ sudo sh agent/hub/install.sh      # idempotent; re-run to upgrade
 
 ## Why a hub, not just the router agent
 
-It collapses five separate threads (recorded in brvg-internal open-tasks 📡):
+It collapses five separate threads:
 
 1. **Vendor independence.** Peplink and Cradlepoint have no on-device app platform, and the CBA850
    is NetCloud-tethered and end-of-support in 2027. A hub runs behind *any* internet — dock Wi-Fi,

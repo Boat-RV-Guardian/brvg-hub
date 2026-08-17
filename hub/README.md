@@ -1,6 +1,6 @@
 # BRVG hub (TypeScript) — Pi / Docker / desktop
 
-The **hub tier** of the on-site architecture (brvg-internal `docs/HUB-PROXY.md`). It receives the
+The **hub tier** of the on-site architecture of Boat & RV Guardian. It receives the
 Shellys' webhooks on the LAN and rolls them up into ONE `/api/agent/batch` report per interval —
 the same wire contract the shell relay on a GL.iNet speaks, and the same the worker validates.
 

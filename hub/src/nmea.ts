@@ -1,5 +1,4 @@
-// NMEA 0183 over TCP — the hub's GPS source (owner direction 2026-08-17, brvg-internal
-// docs/HUB-PROXY.md). A router with onboard GNSS (Cradlepoint "Send to Client(s)", a chartplotter,
+// NMEA 0183 over TCP — the hub's GPS source (owner direction 2026-08-17). A router with onboard GNSS (Cradlepoint "Send to Client(s)", a chartplotter,
 // gpsd) serves a live sentence stream on a LAN port; the hub dials it, parses fixes, and reports
 // `gps.measurement` through the ordinary roll-up. The hub is always the CLIENT — nothing on the
 // boat listens except the router on its LAN side, and the stream never leaves the LAN.

@@ -2,9 +2,8 @@
 
 One POSIX-shell agent, two homes: a **GL.iNet router** (busybox ash, procd) and a **Raspberry
 Pi-class hub** (systemd). It pushes GPS and modem telemetry **outbound** over HTTPS to the hosted
-worker on a timer, so the vehicle reports without the app being onsite. Design of record:
-`brvg-internal/docs/ROUTER-PHONE-HOME.md` (Phase A = telemetry push; the Phase B command channel
-is deliberately not in this skeleton).
+worker on a timer, so the vehicle reports without the app being onsite. Phase A = telemetry push;
+the Phase B command channel is deliberately not in this skeleton.
 
 ## How it reports
 
@@ -132,7 +131,7 @@ bench session (2026-08-06) plus standard NMEA/gpsd shapes. Runs in CI (`agent` j
 ## Relay tier (X750-class routers) — roll up the Shellys' reports
 
 `RELAY_ENABLED=1` in `/etc/brvg-agent.conf` turns this agent into the **relay tier** of the hub
-architecture (brvg-internal `docs/HUB-PROXY.md`): a LAN-only uhttpd instance serves
+architecture: a LAN-only uhttpd instance serves
 `relay-cgi.sh` at `http://<router>:8181/cgi-bin/report`, the Shellys' webhooks are re-registered
 against it, and the agent drains the spool into ONE `/api/agent/batch` report per modem interval.
 
