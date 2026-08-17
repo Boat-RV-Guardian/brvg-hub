@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.6.0"
+AGENT_VERSION="0.5.0"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -557,10 +557,44 @@ self_update() {
   return 0
 }
 
-# --- Lockdown release (shared rule-name contract) ---------------------------------------------
-# Removes the lockdown rules. Kept after the watchdog's removal (owner 2026-08-17: lockdown fails
-# CLOSED — it is SIM-usage control, not a security posture) because the app's SSH enforcement and
-# the typed command channel ("lockdown off") drive the same rules.
+# --- Hub watchdog: fail open rather than leave the vessel silent ------------------------------
+# Owner decision 2026-08-13. Under lockdown deny-all the hub is the ONLY path to the cloud. When
+# the hub runs ON this router the failure domains coincide (a dead router means a dead gateway
+# anyway) — but when it runs on a Pi/Docker/desktop it can die while the router routes happily,
+# and the vessel goes silent with no remote way back in.
+#
+# So the ROUTER watches the hub: it is the enforcement point, and it is independently alive. After
+# HUB_WATCH_FAILS consecutive failed health checks it RELEASES lockdown (availability beats
+# lockdown purity) and reports it.
+#
+# The event names are chosen, not invented. `hub.offline` / `hub.online` match the worker's
+# existing /offline|online/ → health rule INTENTIONALLY, so this needs no notifyCategories change.
+# Checked against the real rules table, and the near-miss is instructive: `lockdown.released` also
+# classifies — but only because "lockdown" happens to contain the substring "down" from the
+# /…|down|fall/ rule. That is an accident, and it would evaporate the day someone tightens that
+# rule to \bdown\b, silently sending a "your firewall was released" alert to NOBODY
+# (categoryForEvent returns null → delivered to no one). Match on purpose, not by coincidence.
+#
+# It deliberately does NOT re-arm on recovery: a hub that restarts every few minutes would flap the
+# firewall (each apply is a ~10 s reload). The released state is announced; re-arming is one tap in
+# the app.
+
+HUB_WATCH_FAILS_FILE="${BRVG_HUB_FAILS:-/tmp/brvg-hub-watch.fails}"
+HUB_WATCH_RELEASED="${BRVG_HUB_RELEASED:-/tmp/brvg-hub-watch.released}"
+
+# PURE: given the consecutive-failure count, the threshold, whether we already released, and
+# whether the last probe succeeded — what should happen? Echoes: release | recover | none
+watch_decide() {
+  _healthy="$1"; _fails="$2"; _threshold="$3"; _released="$4"
+  if [ "$_healthy" = "1" ]; then
+    [ "$_released" = "1" ] && { echo recover; return 0; }
+    echo none; return 0
+  fi
+  if [ "$_released" = "1" ]; then echo none; return 0; fi
+  if [ "$_fails" -ge "$_threshold" ]; then echo release; return 0; fi
+  echo none
+}
+
 # Remove every lockdown rule. The `brvg_lk_` NAME PREFIX is the shared contract between this and
 # the app's SSH enforcement (src-tauri/src/lockdown.rs) — matching on the prefix, not on shared
 # code, is what lets two languages manage the same rules without drifting.
@@ -576,6 +610,40 @@ release_lockdown() {
   uci commit firewall
   /etc/init.d/firewall reload >/dev/null 2>&1 || true
   return 0
+}
+
+watch_hub() {
+  [ -n "${HUB_WATCH_URL:-}" ] || return 0
+  _threshold="${HUB_WATCH_FAILS:-5}"
+  _fails=$( (cat "$HUB_WATCH_FAILS_FILE" 2>/dev/null || echo 0) | tr -cd '0-9' )
+  _fails=${_fails:-0}
+  _released=0; [ -f "$HUB_WATCH_RELEASED" ] && _released=1
+
+  if curl -fsS --max-time 8 "$HUB_WATCH_URL" >/dev/null 2>&1; then
+    _healthy=1; _fails=0
+  else
+    _healthy=0; _fails=$((_fails + 1))
+  fi
+  echo "$_fails" > "$HUB_WATCH_FAILS_FILE"
+
+  case "$(watch_decide "$_healthy" "$_fails" "$_threshold" "$_released")" in
+    release)
+      if release_lockdown; then
+        : > "$HUB_WATCH_RELEASED"
+        log "hub unreachable ${_fails}x — RELEASED lockdown so the vehicle keeps reporting"
+        send_event "hub.offline" "released=1" || true
+      else
+        log "hub unreachable ${_fails}x — no lockdown rules to release"
+        : > "$HUB_WATCH_RELEASED"   # don't retry the release every tick
+        send_event "hub.offline" "released=0" || true
+      fi
+      ;;
+    recover)
+      rm -f "$HUB_WATCH_RELEASED"
+      log "hub is answering again (network restrictions stay OFF until re-applied in the app)"
+      send_event "hub.online" "rearmed=0" || true
+      ;;
+  esac
 }
 
 push_gps() {
@@ -721,6 +789,7 @@ main() {
     if [ "$_elapsed" -ge "$MODEM_INTERVAL" ]; then
       push_modem
       [ "${HUB_LITE_ENABLED:-0}" = "1" ] && drain_relay
+      watch_hub
       _elapsed=0
     fi
     # A command ran during the sends above. Its effect is NOT in the report that carried it — that

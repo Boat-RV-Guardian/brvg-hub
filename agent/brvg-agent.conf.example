@@ -43,3 +43,13 @@ RECEIVER_PORT=8181
 # leave the cloud's view stale.
 KEYFRAME_EVERY=6
 
+# --- Hub watchdog (fail open) -------------------------------------------------------------------
+# Only for a hub running on a SEPARATE box (a Pi, Docker, the desktop app). When the hub runs on
+# this router the failure domains already coincide and this is pointless.
+#
+# Under a "traffic" lockdown the hub is the only path to the cloud, so if it dies the vehicle goes
+# silent. The router watches its health endpoint and, after HUB_WATCH_FAILS consecutive failures,
+# RELEASES the lockdown rules so reporting resumes — and tells you it did. It does NOT re-arm on
+# recovery (a flapping hub would thrash the firewall); re-apply from the app when you're ready.
+HUB_WATCH_URL=""            # e.g. http://192.168.8.50:8181/healthz — empty disables the watchdog
+HUB_WATCH_FAILS=5           # consecutive failed checks before failing open (one check per modem tick)
