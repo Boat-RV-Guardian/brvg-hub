@@ -377,6 +377,110 @@ collect_modem() {
   echo "${sig}|${carrier}|${sim}|${data}"
 }
 
+# --- Anchor watch (local detection; the cloud stands down while we report) ---------------------
+# The anchor alarm's LOGIC runs here, aboard, on every GPS tick — the cloud sweep only acts for
+# boats with nothing local running (it sees our `anchorwatch=1` tag on gps reports and yields).
+# Config arrives as `"anchor":{...}` on the report reply whenever the signature we report
+# (`anchorsig`) differs from the vehicle's armed config — config-as-state, so a reboot self-heals:
+# /tmp state is gone, the next report says sig 0, the reply re-arms us.
+#
+# Detection mirrors the app's reducer, not the cloud sweep's: we SEE A STREAM, so an alarm takes
+# TWO consecutive fixes outside the radius by more than each fix's own reported accuracy. One
+# borderline fix inside the GPS error bar never fires anything.
+
+ANCHOR_STATE="${BRVG_ANCHOR_STATE:-/tmp/brvg-anchor.state}"       # "sig lat lon radiusM warnM"
+ANCHOR_ALERTED="${BRVG_ANCHOR_ALERTED:-/tmp/brvg-anchor.alerted}" # sig whose ALARM already fired
+ANCHOR_WARNED="${BRVG_ANCHOR_WARNED:-/tmp/brvg-anchor.warned}"    # sig whose WARNING already fired
+ANCHOR_STREAK="${BRVG_ANCHOR_STREAK:-/tmp/brvg-anchor.streak}"    # consecutive alarm-breach fixes
+ANCHOR_WSTREAK="${BRVG_ANCHOR_WSTREAK:-/tmp/brvg-anchor.wstreak}" # consecutive warn-breach fixes
+
+# The signature of the watch we are running; "0" when disarmed. Reported on every gps tick.
+anchor_sig() {
+  set -- $(cat "$ANCHOR_STATE" 2>/dev/null)
+  printf '%s' "${1:-0}"
+}
+
+# Pure: great-circle distance in whole meters (haversine; busybox awk has the trig).
+anchor_distance() {
+  awk -v la1="$1" -v lo1="$2" -v la2="$3" -v lo2="$4" 'BEGIN {
+    r = 0.017453292519943295; R = 6371000;
+    dla = (la2 - la1) * r; dlo = (lo2 - lo1) * r;
+    sa = sin(dla / 2); sb = sin(dlo / 2);
+    a = sa * sa + cos(la1 * r) * cos(la2 * r) * sb * sb;
+    if (a > 1) a = 1;
+    printf "%d", 2 * R * atan2(sqrt(a), sqrt(1 - a));
+  }'
+}
+
+# Pure: pull the `"anchor":{...}` object off a report reply → "sig lat lon radiusM warnM" (a bare
+# "0" for the stand-down, which the worker sends as {"sig":0}). Empty when the reply has none —
+# the common case. Same tiny-sed approach as parse_commands: fixed shape, no JSON parser aboard.
+parse_anchor() {
+  _in=$(tr -d ' \n' | sed -n 's/.*"anchor":{\([^}]*\)}.*/\1/p')
+  [ -z "$_in" ] && return 0
+  _sig=$(printf '%s' "$_in" | sed -n 's/.*"sig":\(-\{0,1\}[0-9][0-9]*\).*/\1/p')
+  [ -z "$_sig" ] && return 0
+  if [ "$_sig" = "0" ]; then printf '0'; return 0; fi
+  _la=$(printf '%s' "$_in" | sed -n 's/.*"lat":\(-\{0,1\}[0-9.][0-9.]*\).*/\1/p')
+  _lo=$(printf '%s' "$_in" | sed -n 's/.*"lon":\(-\{0,1\}[0-9.][0-9.]*\).*/\1/p')
+  _ra=$(printf '%s' "$_in" | sed -n 's/.*"radiusM":\([0-9][0-9]*\).*/\1/p')
+  _wa=$(printf '%s' "$_in" | sed -n 's/.*"warnM":\([0-9][0-9]*\).*/\1/p')
+  [ -z "$_la" ] || [ -z "$_lo" ] || [ -z "$_ra" ] && return 0
+  printf '%s %s %s %s %s' "$_sig" "$_la" "$_lo" "$_ra" "${_wa:-0}"
+}
+
+# Adopt a config from the reply. A changed signature is a NEW EPISODE by construction: latches and
+# streaks reset, exactly like the cloud sweep's re-arm semantics.
+apply_anchor() {
+  _new_sig="${1:-}"
+  [ -z "$_new_sig" ] && return 0
+  _cur=$(anchor_sig)
+  [ "$_new_sig" = "$_cur" ] && return 0
+  rm -f "$ANCHOR_ALERTED" "$ANCHOR_WARNED" "$ANCHOR_STREAK" "$ANCHOR_WSTREAK" 2>/dev/null
+  if [ "$_new_sig" = "0" ]; then
+    rm -f "$ANCHOR_STATE" 2>/dev/null
+    log "anchor watch: disarmed by cloud config"
+  else
+    printf '%s %s %s %s %s' "$_new_sig" "$2" "$3" "$4" "${5:-0}" > "$ANCHOR_STATE"
+    log "anchor watch: armed (radius ${4}m, warn ${5:-0}m, sig $_new_sig)"
+  fi
+}
+
+# One ring's two-consecutive-fixes rule. $1 streak-file $2 latch-file $3 sig $4 dist $5 limit
+# $6 event $7 extra-params. Fires at most once per episode; recovery inside the ring clears both.
+anchor_ring() {
+  if [ "$4" -gt "$5" ]; then
+    _n=$(( $(cat "$1" 2>/dev/null | tr -cd '0-9') + 1 ))
+    echo "$_n" > "$1"
+    if [ "$_n" -ge 2 ] && [ "$(cat "$2" 2>/dev/null)" != "$3" ]; then
+      log "anchor watch: $6 at ${4}m (limit ${5}m)"
+      send_event "$6" "$7"
+      echo "$3" > "$2"
+    fi
+  else
+    rm -f "$1" 2>/dev/null
+    [ -s "$2" ] && { rm -f "$2" 2>/dev/null; log "anchor watch: back inside — episode over"; }
+  fi
+}
+
+# Evaluate one fix against the armed watch. $1 lat $2 lon $3 acc (may be empty → 0).
+check_anchor() {
+  [ -s "$ANCHOR_STATE" ] || return 0
+  set -- $1 $2 ${3:-0} $(cat "$ANCHOR_STATE")
+  _flat=$1; _flon=$2; _facc=$3; _sig=$4; _alat=$5; _alon=$6; _rad=$7; _warn=${8:-0}
+  _d=$(anchor_distance "$_alat" "$_alon" "$_flat" "$_flon")
+  # Beyond-accuracy rule per ring: the fix must be outside by MORE than its own error bar.
+  _acc_i=$(printf '%s' "$_facc" | cut -d. -f1); _acc_i=${_acc_i:-0}
+  anchor_ring "$ANCHOR_STREAK" "$ANCHOR_ALERTED" "$_sig" "$_d" $(( _rad + _acc_i )) \
+    "anchor.motion" "dist=$_d&limit=$_rad"
+  # Warning ring: only while the ALARM ring holds — the drag alarm says everything the warning
+  # would. Cleared latches let a future drift warn again after recovery.
+  if [ "$_warn" -gt 0 ] && [ "$_d" -le $(( _rad + _acc_i )) ]; then
+    anchor_ring "$ANCHOR_WSTREAK" "$ANCHOR_WARNED" "$_sig" "$_d" $(( _warn + _acc_i )) \
+      "anchor.warn.motion" "dist=$_d&limit=$_warn"
+  fi
+}
+
 # --- Push --------------------------------------------------------------------------------------
 
 # Pure: report URL for an event + pre-encoded params (exercised by test.sh). Token path wins.
@@ -419,6 +523,8 @@ send_event() {
   PENDING_ACK=""   # the worker saw our acks; anything still queued comes back below
   _cmds=$(printf '%s' "$_resp" | parse_commands)
   [ -n "$_cmds" ] && run_commands "$_cmds"
+  _anch=$(printf '%s' "$_resp" | parse_anchor)
+  [ -n "$_anch" ] && apply_anchor $_anch
   return 0
 }
 
@@ -690,9 +796,18 @@ watch_hub() {
 push_gps() {
   set -- $(collect_gps)
   [ -z "$1" ] && { log "no GPS fix this tick"; return 0; }
-  _p="lat=$1&lon=$2"
-  [ -n "$3" ] && _p="$_p&acc=$3"
+  _glat=$1; _glon=$2; _gacc=${3:-}
+  _p="lat=$_glat&lon=$_glon"
+  [ -n "$_gacc" ] && _p="$_p&acc=$_gacc"
+  # anchorsig on EVERY report (the worker replies with the config when we're stale — including
+  # the stand-down); anchorwatch=1 only while armed, which is what tells the cloud sweep a local
+  # watcher owns the anchor logic and it should yield.
+  _asig=$(anchor_sig)
+  _p="$_p&anchorsig=$_asig"
+  [ "$_asig" != "0" ] && _p="$_p&anchorwatch=1"
   send_event "gps.measurement" "$_p"
+  # AFTER the send: a config adopted from this very reply evaluates against this same fix.
+  check_anchor "$_glat" "$_glon" "$_gacc"
 }
 
 # --- WAN usage accounting -----------------------------------------------------------------------

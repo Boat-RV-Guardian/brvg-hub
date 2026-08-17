@@ -362,6 +362,82 @@ out=$(printf '{"commands":[{"id":"s3","cmd":"local_admin_off --now"}]}' | parse_
 check "lockdown: a verb carrying an argument is rejected" "" "$out"
 
 echo ""
+# --- anchor_distance ---
+out=$(anchor_distance 41.4086 -81.7494 41.4086 -81.7494)
+check "anchor: same point is 0 m" "0" "$out"
+
+# ~0.0009° of latitude ≈ 100 m, longitude-independent.
+out=$(anchor_distance 41.4086 -81.7494 41.4095 -81.7494)
+ok=0; [ "$out" -ge 95 ] && [ "$out" -le 105 ] && ok=1
+check "anchor: 0.0009 deg lat ≈ 100 m (got ${out}m)" "1" "$ok"
+
+# Across the date line: 0.001° of longitude at the equator ≈ 111 m either way around.
+out=$(anchor_distance 0 179.9995 0 -179.9995)
+ok=0; [ "$out" -ge 105 ] && [ "$out" -le 120 ] && ok=1
+check "anchor: date-line crossing stays short (got ${out}m)" "1" "$ok"
+
+# --- parse_anchor ---
+out=$(printf '{"status":"ok","anchor":{"lat":41.4086,"lon":-81.7494,"radiusM":50,"warnM":30,"sig":1234}}' | parse_anchor)
+check "anchor: full config parses" "1234 41.4086 -81.7494 50 30" "$out"
+
+out=$(printf '{"status":"ok","anchor":{"sig":0}}' | parse_anchor)
+check "anchor: stand-down parses to bare 0" "0" "$out"
+
+out=$(printf '{"status":"ok"}' | parse_anchor)
+check "anchor: reply without config yields nothing" "" "$out"
+
+out=$(printf '{"status":"ok","commands":[{"id":"c1","cmd":"report_now"}],"anchor":{"lat":1.5,"lon":2.5,"radiusM":100,"warnM":0,"sig":99}}' | parse_anchor)
+check "anchor: coexists with a commands payload" "99 1.5 2.5 100 0" "$out"
+
+out=$(printf '{"anchor":{"lat":1.5,"sig":7}}' | parse_anchor)
+check "anchor: partial config (no lon/radius) rejected" "" "$out"
+
+# --- check_anchor end-to-end (state in a scratch dir; send_event stubbed to record) ---
+_scratch=$(mktemp -d)
+ANCHOR_STATE="$_scratch/state"; ANCHOR_ALERTED="$_scratch/alerted"; ANCHOR_WARNED="$_scratch/warned"
+ANCHOR_STREAK="$_scratch/streak"; ANCHOR_WSTREAK="$_scratch/wstreak"
+SENT_EVENTS="$_scratch/sent"
+send_event() { echo "$1 $2" >> "$SENT_EVENTS"; }
+log() { :; }
+
+apply_anchor 1234 41.4086 -81.7494 50 0
+check "anchor: armed state written" "1234" "$(anchor_sig)"
+
+# Fix 1 outside (~100 m, radius 50): streak starts, nothing fires yet.
+check_anchor 41.4095 -81.7494 5
+check "anchor: one breaching fix fires nothing" "" "$(cat "$SENT_EVENTS" 2>/dev/null)"
+
+# Fix 2 outside: alarm fires once.
+check_anchor 41.4095 -81.7494 5
+check "anchor: second consecutive breach fires the alarm" "anchor.motion dist=100&limit=50" "$(cat "$SENT_EVENTS")"
+
+# Fix 3 outside: still latched — no repeat.
+check_anchor 41.4095 -81.7494 5
+check "anchor: latched — a third breach does not repeat" "1" "$(wc -l < "$SENT_EVENTS" | tr -cd '0-9')"
+
+# Back inside: episode over; a new drag alarms again after two fixes.
+check_anchor 41.4086 -81.7494 5
+check_anchor 41.4095 -81.7494 5
+check_anchor 41.4095 -81.7494 5
+check "anchor: recovery then re-drag fires a NEW alarm" "2" "$(wc -l < "$SENT_EVENTS" | tr -cd '0-9')"
+
+# Accuracy guard: outside by less than the fix's own error bar never counts.
+: > "$SENT_EVENTS"; rm -f "$ANCHOR_ALERTED" "$ANCHOR_STREAK"
+check_anchor 41.4095 -81.7494 80   # 100 m out, but ±80 m accuracy on a 50 m radius ⇒ inside the bar
+check_anchor 41.4095 -81.7494 80
+check "anchor: breach inside the accuracy bar fires nothing" "" "$(cat "$SENT_EVENTS" 2>/dev/null)"
+
+# Warning ring: fires on the inner ring while the alarm ring holds.
+apply_anchor 5678 41.4086 -81.7494 200 50
+check_anchor 41.4095 -81.7494 5    # ~100 m: inside 200 m alarm, outside 50 m warn
+check_anchor 41.4095 -81.7494 5
+check "anchor: warning ring fires on the inner ring" "anchor.warn.motion dist=100&limit=50" "$(cat "$SENT_EVENTS")"
+
+# Stand-down clears everything.
+apply_anchor 0
+check "anchor: stand-down disarms" "0" "$(anchor_sig)"
+rm -rf "$_scratch"
+
 if [ "$fails" -gt 0 ]; then
   echo "$fails test(s) FAILED"
   exit 1
