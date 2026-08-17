@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.7.0"
+AGENT_VERSION="0.8.0"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -246,7 +246,11 @@ EOF_DEVS
   _items=$(spool_to_items < "$_items_src")
   _body=$(build_batch_json "$_seq" "$_kind" "$_items" "$_ok_ids" "$(relay_boot_id)")
   _url="${WORKER_URL}/api/agent/batch?vid=${VID}&device=${DEVICE_ID}&t=${DEVICE_TOKEN}"
-  if curl -fsS --max-time 20 -X POST -H 'Content-Type: application/json' -d "$_body" "$_url" >/dev/null 2>&1; then
+  # Same command piggyback + ack as send_event: the batch reply carries pending verbs, and the
+  # request that delivers acks is the next one out — whichever path (event or batch) goes first.
+  [ -n "$PENDING_ACK" ] && _url="${_url}&ack=${PENDING_ACK}"
+  if _resp=$(curl -fsS --max-time 20 -X POST -H 'Content-Type: application/json' -d "$_body" "$_url" 2>/dev/null); then
+    PENDING_ACK=""
     echo "$_seq" > "$RELAY_SEQ_FILE"
     # Persist last-sent per device so the next delta knows what "unchanged" means.
     while IFS= read -r _dev; do
@@ -256,6 +260,8 @@ $(spool_devices < "$_sending")
 EOF_DEVS2
     rm -f "$_sending" "$_items_src"
     log "relay: drained batch seq=$_seq ($_kind)"
+    _cmds=$(printf '%s' "$_resp" | parse_commands)
+    [ -n "$_cmds" ] && run_commands "$_cmds"
   else
     rm -f "$_items_src"
     log "relay: batch seq=$_seq failed (will retry with the same seq)"
@@ -491,6 +497,18 @@ run_commands() {
       interval_regular)  set_intervals 900 1800 ;;
       interval_often)    set_intervals 300 600 ;;
       interval_constant) set_intervals 30 300 ;;
+      # Traffic lockdown on/off (Phase B first verbs, owner sprint 2026-08-17). ON re-arms the
+      # watchdog's released marker so a later hub death can release again; OFF is the same
+      # release the watchdog performs. Both safe-by-construction: they arrive only as the reply
+      # to a report that SUCCEEDED, so cloud reachability is proven at the moment they run.
+      lockdown_on)
+        log "command: lockdown_on"
+        if apply_lockdown; then rm -f "$HUB_WATCH_RELEASED" 2>/dev/null; else log "lockdown_on: uci unavailable"; fi
+        FOLLOWUP_REPORT=1 ;;
+      lockdown_off)
+        log "command: lockdown_off"
+        release_lockdown || log "lockdown_off: nothing to release"
+        FOLLOWUP_REPORT=1 ;;
       gps_on)       log "command: gps_on"
                     at_cmd 'AT+QGPSCFG="autogps",1' 3 >/dev/null 2>&1
                     at_cmd 'AT+QGPS=1' 3 >/dev/null 2>&1
@@ -607,6 +625,25 @@ release_lockdown() {
   done
   [ -n "$_del" ] || return 1          # nothing of ours applied — nothing to release
   for _j in $_del; do uci delete "firewall.@rule[$_j]" 2>/dev/null; done
+  uci commit firewall
+  /etc/init.d/firewall reload >/dev/null 2>&1 || true
+  return 0
+}
+
+# Argument-free traffic lockdown: ONE catch-all REJECT rule (lan->wan), named under the shared
+# brvg_lk_ prefix so the app's SSH enforcement, the watchdog, and release_lockdown all manage the
+# same set. fw3/fw4 consult rules before zone forwardings, so this closes the forward chain while
+# the hub (OUTPUT, not FORWARD) keeps reporting. Per-MAC allow rules stay app-applied — a verb
+# carries no arguments, so it can only express the no-allows shape.
+apply_lockdown() {
+  command -v uci >/dev/null 2>&1 || return 1
+  release_lockdown >/dev/null 2>&1 || true   # idempotent re-apply; hand-written rules survive
+  _n=$(uci add firewall rule) || return 1
+  uci set "firewall.$_n.name=brvg_lk_deny_all"
+  uci set "firewall.$_n.src=lan"
+  uci set "firewall.$_n.dest=wan"
+  uci set "firewall.$_n.proto=any"
+  uci set "firewall.$_n.target=REJECT"
   uci commit firewall
   /etc/init.d/firewall reload >/dev/null 2>&1 || true
   return 0

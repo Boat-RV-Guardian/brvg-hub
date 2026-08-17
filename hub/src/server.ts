@@ -10,7 +10,7 @@ import { pollCradlepoint } from './cradlepoint.js';
 import type { HubConfig } from './config.js';
 import type { Sender } from './sender.js';
 
-export const HUB_VERSION = '0.5.0';
+export const HUB_VERSION = '0.6.0';
 
 /**
  * Consecutive failed drains before /healthz reports UNHEALTHY (503).
@@ -31,6 +31,43 @@ export interface HubHandle {
 export function startHub(config: HubConfig, send: Sender, log: (m: string) => void = () => {}): HubHandle {
   const agg = new Aggregator(HUB_VERSION, config.keyframeEvery);
   let lastDeliveryAt = 0;
+
+  // Phase B command channel: every delivery may return queued commands; acks ride the NEXT
+  // request out. A command is executed once (its id joins pendingAcks immediately, so the worker
+  // re-sending it until acked cannot re-run it). The hub's verb set is tiny — report_now drains
+  // at once; anything else is acknowledged and DROPPED, same rule as the shell agent: an unknown
+  // verb must never become code execution.
+  let pendingAcks: string[] = [];
+  let drainSoon: ReturnType<typeof setTimeout> | null = null;
+  const runCommand = (cmd: string) => {
+    if (cmd === 'report_now') {
+      log('command: report_now');
+      if (!drainSoon) {
+        drainSoon = setTimeout(() => { drainSoon = null; void drain(); }, 50);
+        drainSoon.unref?.();
+      }
+    } else {
+      log(`command: ignoring '${cmd}' (not a hub verb)`);
+    }
+  };
+  const deliver = async (report: Parameters<Sender>[0]): Promise<boolean> => {
+    const acks = pendingAcks.slice();
+    const r = await send(report, acks);
+    if (!r.ok) return false;
+    pendingAcks = pendingAcks.filter((a) => !acks.includes(a)); // the worker saw these
+    for (const c of r.commands) {
+      if (pendingAcks.includes(c.id)) continue; // still un-acked from a prior reply — already ran
+      pendingAcks.push(c.id);
+      runCommand(c.cmd);
+    }
+    return true;
+  };
+  const drain = async () => {
+    const r = await agg.drain(deliver);
+    if (!r) return;
+    if (r.sent) lastDeliveryAt = Date.now();
+    log(`drain seq=${r.seq} ${r.kind} items=${r.items} ok=${r.ok} ${r.sent ? '' : `(failed x${agg.consecutiveFailures}, will retry)`}`);
+  };
 
   const server = createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://localhost');
@@ -62,8 +99,9 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
     const parsed = parseWebhook(url.searchParams);
     if (!parsed) return;
     if (parsed.urgent) {
-      // Alarms never wait for the roll-up. Fire immediately, on their own.
-      void send(buildUrgent(parsed.item, HUB_VERSION)).then((ok) => {
+      // Alarms never wait for the roll-up. Fire immediately, on their own. (Through `deliver`, so
+      // even an urgent reply can carry commands and flush acks.)
+      void deliver(buildUrgent(parsed.item, HUB_VERSION)).then((ok) => {
         // Only if the immediate send fails does it fall to the spool for the next drain — never
         // both, so an alarm is never double-reported.
         if (!ok) agg.add(parsed.item);
@@ -108,17 +146,11 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
     cpTimer.unref?.();
   }
 
-  const timer = setInterval(() => {
-    void agg.drain(send).then((r) => {
-      if (!r) return;
-      if (r.sent) lastDeliveryAt = Date.now();
-      log(`drain seq=${r.seq} ${r.kind} items=${r.items} ok=${r.ok} ${r.sent ? '' : `(failed x${agg.consecutiveFailures}, will retry)`}`);
-    });
-  }, config.drainIntervalSec * 1000);
+  const timer = setInterval(() => { void drain(); }, config.drainIntervalSec * 1000);
   timer.unref?.();
 
   return {
     server,
-    stop: () => new Promise((resolve) => { nmea?.stop(); if (cpTimer) clearInterval(cpTimer); clearInterval(timer); server.close(() => resolve()); }),
+    stop: () => new Promise((resolve) => { nmea?.stop(); if (cpTimer) clearInterval(cpTimer); if (drainSoon) clearTimeout(drainSoon); clearInterval(timer); server.close(() => resolve()); }),
   };
 }

@@ -8,6 +8,9 @@ const config = (over: Partial<HubConfig> = {}): HubConfig => ({
   port: 0, drainIntervalSec: 3600, keyframeEvery: 6, ...over, // port 0 = ephemeral; slow drain so tests drive it
 });
 
+const ok = { ok: true, commands: [] };
+const fail = { ok: false, commands: [] };
+
 let handle: HubHandle | null = null;
 afterEach(async () => { if (handle) await handle.stop(); handle = null; });
 
@@ -20,7 +23,7 @@ function port(h: HubHandle): number {
 describe('the hub receiver end to end (in-process)', () => {
   it('spools telemetry and answers the sensor 200 immediately', async () => {
     const sent: BatchReport[] = [];
-    handle = startHub(config(), async (r) => { sent.push(r); return true; });
+    handle = startHub(config(), async (r) => { sent.push(r); return ok; });
     const p = port(handle);
     const res = await fetch(`http://127.0.0.1:${p}/cgi-bin/report?device=ht-a&event=humidity.change&rh=55`);
     expect(res.status).toBe(200);
@@ -33,7 +36,7 @@ describe('the hub receiver end to end (in-process)', () => {
 
   it('sends an ALARM immediately, on its own, without waiting for a drain', async () => {
     const sent: BatchReport[] = [];
-    handle = startHub(config(), async (r) => { sent.push(r); return true; });
+    handle = startHub(config(), async (r) => { sent.push(r); return ok; });
     const p = port(handle);
     await fetch(`http://127.0.0.1:${p}/cgi-bin/report?device=flood-a&event=flood.alarm`);
     // give the fire-and-forget send a tick
@@ -45,7 +48,7 @@ describe('the hub receiver end to end (in-process)', () => {
 
   it('spools an alarm only if the immediate send fails — never both', async () => {
     const sent: BatchReport[] = [];
-    handle = startHub(config(), async (r) => { sent.push(r); return false; }); // send always fails
+    handle = startHub(config(), async (r) => { sent.push(r); return fail; }); // send always fails
     const p = port(handle);
     await fetch(`http://127.0.0.1:${p}/cgi-bin/report?device=flood-a&event=flood.alarm`);
     await new Promise((r) => setTimeout(r, 50));
@@ -55,7 +58,7 @@ describe('the hub receiver end to end (in-process)', () => {
   });
 
   it('404s an unknown path', async () => {
-    handle = startHub(config(), async () => true);
+    handle = startHub(config(), async () => ok);
     const res = await fetch(`http://127.0.0.1:${port(handle)}/nope`);
     expect(res.status).toBe(404);
   });
@@ -66,7 +69,7 @@ describe('health reports DELIVERY, not just liveness', () => {
   // would leave a lockdown armed around a hub that cannot deliver — the exact situation fail-open
   // exists to escape. So health has to mean "the vessel is still being heard from".
   it('stays healthy while deliveries succeed', async () => {
-    handle = startHub(config(), async () => true);
+    handle = startHub(config(), async () => ok);
     const p = port(handle);
     await fetch(`http://127.0.0.1:${p}/cgi-bin/report?device=d&event=x.change&v=1`);
     const j: any = await (await fetch(`http://127.0.0.1:${p}/healthz`)).json();
@@ -77,7 +80,7 @@ describe('health reports DELIVERY, not just liveness', () => {
   it('goes UNHEALTHY (503) after sustained delivery failure, so the watchdog can fail open', async () => {
     // A fast drain interval so the timer really runs: the first failed drain retains the batch as
     // `pending`, and every subsequent tick retries it, so each tick is another counted failure.
-    handle = startHub(config({ drainIntervalSec: 0.03 }), async () => false);
+    handle = startHub(config({ drainIntervalSec: 0.03 }), async () => fail);
     const p = port(handle);
     await fetch(`http://127.0.0.1:${p}/cgi-bin/report?device=d&event=x.change&v=1`);
 
@@ -98,6 +101,41 @@ describe('health reports DELIVERY, not just liveness', () => {
     // A WAN blip must not disarm someone's lockdown; at the default 120 s interval this threshold
     // is ~10 minutes of sustained failure, and the watchdog wants several failed probes on top.
     expect(DELIVERY_UNHEALTHY_AFTER).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe('Phase B command channel (reply piggyback)', () => {
+  it('executes report_now once, acks it on the next request, and never re-runs a re-delivered command', async () => {
+    const calls: Array<{ report: BatchReport; acks: string[] }> = [];
+    // Reply carries the same un-acked command TWICE (worker re-sends until acked).
+    handle = startHub(config(), async (report, ackIds = []) => {
+      calls.push({ report, acks: ackIds });
+      return { ok: true, commands: [{ id: 'c1', cmd: 'report_now' }] };
+    });
+    const p = port(handle);
+    // An alarm delivers immediately; its reply queues report_now → a near-immediate drain.
+    await fetch(`http://127.0.0.1:${p}/cgi-bin/report?device=f&event=flood.alarm`);
+    await fetch(`http://127.0.0.1:${p}/cgi-bin/report?device=t&event=x.change&v=1`); // spool something to drain
+    await new Promise((r) => setTimeout(r, 200));
+    expect(calls.length).toBe(2); // the alarm + ONE commanded drain (re-delivered c1 didn't re-trigger)
+    expect(calls[0]!.acks).toEqual([]);
+    expect(calls[1]!.acks).toEqual(['c1']); // the ack rode the next request out
+  });
+
+  it('acknowledges and DROPS a verb the hub does not know', async () => {
+    const calls: Array<string[]> = [];
+    const logs: string[] = [];
+    handle = startHub(config(), async (_r, ackIds = []) => {
+      calls.push(ackIds);
+      return { ok: true, commands: calls.length === 1 ? [{ id: 'x9', cmd: 'reboot' }] : [] };
+    }, (m) => logs.push(m));
+    const p = port(handle);
+    await fetch(`http://127.0.0.1:${p}/cgi-bin/report?device=f&event=flood.alarm`);
+    await new Promise((r) => setTimeout(r, 60));
+    await fetch(`http://127.0.0.1:${p}/cgi-bin/report?device=f2&event=door.alarm`);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(calls[1]).toEqual(['x9']); // acked...
+    expect(logs.some((m) => m.includes("ignoring 'reboot'"))).toBe(true); // ...and dropped, not executed
   });
 });
 

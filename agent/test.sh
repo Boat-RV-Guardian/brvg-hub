@@ -269,6 +269,10 @@ case "$1" in
        printf '%s\n' "$line"; exit 0 ;;
   delete) idx=$(printf '%s' "$2" | sed -n 's/.*@rule\[\([0-9]*\)\].*/\1/p')
        sed -i.bak "$((idx+1))d" "$DB"; exit 0 ;;
+  add) printf 'pending\n' >> "$DB"; echo "newrule"; exit 0 ;;
+  set) v=$(printf '%s' "$2" | sed -n 's/.*\.name=\(.*\)/\1/p')
+       [ -n "$v" ] && sed -i.bak "\$ s/.*/$v/" "$DB"
+       exit 0 ;;
 esac
 exit 0
 FAKEUCI
@@ -281,7 +285,22 @@ check "release_lockdown: removes ONLY brvg_lk_* (hand-written rules survive)" "m
 printf 'my_custom_rule\n' > "$_uci_dir/db"
 out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; release_lockdown >/dev/null 2>&1 && echo released || echo nothing' 2>/dev/null)
 check "release_lockdown: nothing of ours ⇒ reports nothing to release" "nothing" "$out"
+# --- apply_lockdown (the lockdown_on verb) against the same stand-in --------------------------
+printf 'my_custom_rule\n' > "$_uci_dir/db"
+out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; apply_lockdown >/dev/null 2>&1 && echo applied' 2>/dev/null)
+check "apply_lockdown: reports success" "applied" "$out"
+check "apply_lockdown: catch-all lands under the shared prefix, hand-written rules survive" "my_custom_rule
+brvg_lk_deny_all" "$(cat "$_uci_dir/db")"
+# Re-apply must stay ONE rule (release-then-add), not accumulate a stack of them.
+out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; apply_lockdown >/dev/null 2>&1; apply_lockdown >/dev/null 2>&1' 2>/dev/null)
+check "apply_lockdown: idempotent re-apply keeps exactly one rule" "my_custom_rule
+brvg_lk_deny_all" "$(cat "$_uci_dir/db")"
 rm -rf "$_uci_dir"
+
+# The Phase B lockdown verbs ride the same argument-free wire shape.
+out=$(printf '{"commands":[{"id":"l1","cmd":"lockdown_on"},{"id":"l2","cmd":"lockdown_off"}]}' | parse_commands)
+check "commands: lockdown verbs parse" "l1:lockdown_on
+l2:lockdown_off" "$out"
 
 # --- version reporting + update verbs ---
 # `--version` must work with no config: the self-update smoke check runs it on a freshly installed
