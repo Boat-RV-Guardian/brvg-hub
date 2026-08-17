@@ -36,8 +36,8 @@ install -m 0755 "$SRC/openwrt/etc/init.d/brvg-agent" "$WORK/data/etc/init.d/brvg
 # USB GPS → TCP NMEA setup. SHIPPED but not run at install: the dongle is normally plugged in later,
 # and it needs working internet for opkg. `brvg-setup-usb-gps` on the router does the whole job.
 install -m 0755 "$SRC/setup-usb-gps.sh" "$WORK/data/usr/bin/brvg-setup-usb-gps"
-# Relay tier: the CGI webhook receiver (inert until RELAY_ENABLED=1 in the config).
-install -m 0755 "$SRC/relay-cgi.sh" "$WORK/data/www/brvg/cgi-bin/report"
+# Relay tier: the CGI webhook receiver (inert until HUB_LITE_ENABLED=1 in the config).
+install -m 0755 "$SRC/hub-lite-cgi.sh" "$WORK/data/www/brvg/cgi-bin/report"
 
 # NOTE: no config file ships in the package. The config carries this device's token and is written
 # by the app at enrollment; packaging a placeholder would risk overwriting a live one on upgrade.

@@ -48,9 +48,9 @@ export function loadConfig(env: Record<string, string | undefined>): HubConfig {
     deviceId,
     token,
     workerBase: workerBase.replace(/\/$/, ''),
-    port: num(env.RELAY_PORT, 8181, 1),
+    port: num(env.RECEIVER_PORT, 8181, 1),
     drainIntervalSec: num(env.DRAIN_INTERVAL, 120, 30), // floor 30 s — this rides a metered link
-    keyframeEvery: num(env.RELAY_KEYFRAME_EVERY, 6, 1),
+    keyframeEvery: num(env.KEYFRAME_EVERY, 6, 1),
     nmeaHost: (env.NMEA_HOST || '').trim(),
     nmeaPort: num(env.NMEA_PORT, 10110, 1),
     cradlepointHost: (env.CRADLEPOINT_HOST || '').trim(),

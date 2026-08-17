@@ -1,7 +1,7 @@
 // Turn an incoming Shelly webhook into a spool entry. The Shellys fire the URL the app registered
 // (buildRelayWebhookUrl): ?device=<id>&event=<ev>&<values>. This is the hub's front door.
 //
-// URGENT vs telemetry is drawn on the SAME line the worker and the shell relay use (events.ts
+// URGENT vs telemetry is drawn on the SAME line the worker and the shell hub-lite use (events.ts
 // isTelemetry): *.measurement / *.change batch; everything else — alarms, alarm-clears, button —
 // goes to the cloud immediately, on its own. Aggregation never delays an alarm.
 
@@ -28,7 +28,7 @@ export function isTelemetryEvent(event: string): boolean {
 }
 
 /**
- * Parse the query of a relay webhook request. Returns null when it carries no usable device+event
+ * Parse the query of an incoming webhook request. Returns null when it carries no usable device+event
  * — the caller answers 200 regardless (a sleepy sensor is awake on borrowed battery; never make it
  * wait or retry), it just spools nothing.
  */

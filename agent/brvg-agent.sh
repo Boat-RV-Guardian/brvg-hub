@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.4.1"
+AGENT_VERSION="0.5.0"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -100,7 +100,7 @@ parse_gpsd_tpv() {
 urlencode_spaces() { printf '%s' "$1" | sed 's/ /%20/g; s/&/%26/g'; }
 
 # --- Relay: spool → batch report (HUB-PROXY.md, relay tier) ------------------------------------
-# The CGI receiver (relay-cgi.sh) appends webhook lines to a spool; these functions roll the spool
+# The CGI receiver (hub-lite-cgi.sh) appends webhook lines to a spool; these functions roll the spool
 # up into ONE batch POST. Wire contract: brvg-cloud-server/src/agentBatch.ts (v1); the canonical
 # fixture there is what agent/test.sh checks this output against.
 #
@@ -113,7 +113,7 @@ urlencode_spaces() { printf '%s' "$1" | sed 's/ /%20/g; s/&/%26/g'; }
 
 # Spool lines (epoch	device	event	rawquery) → the JSON items array, deduped per device+event
 # KEEPING THE NEWEST (a later line overwrites — the spool is append-ordered). stdout: one line,
-# a JSON array. Decode + escape here must match relay-cgi.sh byte for byte (tested).
+# a JSON array. Decode + escape here must match hub-lite-cgi.sh byte for byte (tested).
 spool_to_items() {
   awk -F'	' '
     function urldec(s,  out, i, c, h, hex) {
@@ -175,7 +175,7 @@ build_batch_json() {
     _ok="$_ok\"$_d\""
   done
   _ok="$_ok]"
-  printf '{"v":1,"seq":%s,"boot":"%s","kind":"%s","items":%s,"ok":%s,"agent":{"av":"%s","tier":"relay"}}'     "$1" "$5" "$2" "${3:-[]}" "$_ok" "$AGENT_VERSION"
+  printf '{"v":1,"seq":%s,"boot":"%s","kind":"%s","items":%s,"ok":%s,"agent":{"av":"%s","tier":"hub-lite"}}'     "$1" "$5" "$2" "${3:-[]}" "$_ok" "$AGENT_VERSION"
 }
 
 RELAY_SPOOL="${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
@@ -226,7 +226,7 @@ drain_relay() {
   # Split: a device whose newest spooled line matches its last-SENT line has nothing new — it goes
   # in `ok` (freshness only). Everything else ships as items. Keyframe every Nth drain resends all.
   _kind="delta"
-  [ $(( _seq % ${RELAY_KEYFRAME_EVERY:-6} )) -eq 0 ] && _kind="keyframe"
+  [ $(( _seq % ${KEYFRAME_EVERY:-6} )) -eq 0 ] && _kind="keyframe"
   _items_src="$_sending.items"
   : > "$_items_src"
   _ok_ids=""
@@ -782,13 +782,13 @@ main() {
   sleep $(( $$ % 20 ))
   # An urgent webhook (alarm) pokes the drain immediately — aggregation must never delay one that
   # the CGI failed to deliver directly.
-  [ "${RELAY_ENABLED:-0}" = "1" ] && trap drain_relay USR1
+  [ "${HUB_LITE_ENABLED:-0}" = "1" ] && trap drain_relay USR1
   _elapsed=$MODEM_INTERVAL   # first loop sends both
   while :; do
     push_gps
     if [ "$_elapsed" -ge "$MODEM_INTERVAL" ]; then
       push_modem
-      [ "${RELAY_ENABLED:-0}" = "1" ] && drain_relay
+      [ "${HUB_LITE_ENABLED:-0}" = "1" ] && drain_relay
       watch_hub
       _elapsed=0
     fi

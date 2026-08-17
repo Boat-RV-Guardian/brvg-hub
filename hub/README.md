@@ -2,19 +2,19 @@
 
 The **hub tier** of the on-site architecture of Boat & RV Guardian. It receives the
 Shellys' webhooks on the LAN and rolls them up into ONE `/api/agent/batch` report per interval —
-the same wire contract the shell relay on a GL.iNet speaks, and the same the worker validates.
+the same wire contract the shell hub-lite on a GL.iNet speaks, and the same the worker validates.
 
 **Why TypeScript, and why a hub rather than the router agent** (owner, 2026-08-13): a capable box
 (a Pi, a Docker host, the desktop app) can host far more than the 416 KB of writable flash on a
 GL-X750 allows. The hub is the growth path — aggregation today, provisioning and configuration
 next — and living in TypeScript means it can share the app's existing Shelly code instead of a
-second implementation drifting from the first. On the constrained routers the shell relay stays;
-**a relay is a subset of a hub, never a variant**, which is why both are tested against the one
+second implementation drifting from the first. On the constrained routers the shell hub-lite stays;
+**a hub-lite is a subset of a hub, never a variant**, which is why both are tested against the one
 canonical batch fixture.
 
 ## What it does today
 
-- Listens on `:8181` (`/cgi-bin/report`, same path as the shell relay) for Shelly webhooks.
+- Listens on `:8181` (`/cgi-bin/report`, same path as the shell hub-lite) for Shelly webhooks.
 - Spools telemetry (`*.measurement` / `*.change`) and drains one roll-up per interval, with an
   unchanged device riding the `ok` list instead of re-sending its reading.
 - Sends **alarms immediately, on their own** — aggregation never delays one.
@@ -42,9 +42,9 @@ Config is environment variables (enroll the hub in the app to mint `DEVICE_TOKEN
 | `DEVICE_ID` | ✓ | — |
 | `DEVICE_TOKEN` | ✓ | — |
 | `WORKER_URL` | | `https://api.boatrvguardian.com` (must be https) |
-| `RELAY_PORT` | | `8181` |
+| `RECEIVER_PORT` | | `8181` |
 | `DRAIN_INTERVAL` | | `120` (floor 30) |
-| `RELAY_KEYFRAME_EVERY` | | `6` |
+| `KEYFRAME_EVERY` | | `6` |
 | `NMEA_HOST` | | — (empty = NMEA source off) |
 | `NMEA_PORT` | | `10110` |
 | `CRADLEPOINT_HOST` | | — (empty = Cradlepoint poll off) |

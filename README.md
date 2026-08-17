@@ -10,7 +10,7 @@ Two implementations of **one wire contract**:
 | --- | --- | --- |
 | Language | TypeScript (Node 18+, zero runtime deps) | POSIX shell + uhttpd CGI |
 | Hosts | Raspberry Pi, Docker, desktop | GL.iNet / OpenWrt-class routers (KBs footprint) |
-| Does | webhook receiver, roll-up aggregation, NMEA 0183 TCP GPS source, local growth path (control, local API/UI) | webhook relay, roll-up, modem + GPS telemetry, immediate alarm passthrough |
+| Does | webhook receiver, roll-up aggregation, NMEA 0183 TCP GPS source, local growth path (control, local API/UI) | webhook receive-and-forward, roll-up, modem + GPS telemetry, immediate alarm passthrough |
 
 A hub-lite is a **subset of a hub, never a variant**: both speak the same batch report format, and
 the shared fixtures in each side's tests are what keep them from drifting. If you change the

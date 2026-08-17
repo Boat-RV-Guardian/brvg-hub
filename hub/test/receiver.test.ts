@@ -5,7 +5,7 @@ import { loadConfig, ConfigError } from '../src/config.js';
 const q = (s: string) => new URLSearchParams(s);
 
 describe('parseWebhook', () => {
-  it('parses a relay webhook into an item with its values', () => {
+  it('parses an incoming webhook into an item with its values', () => {
     const p = parseWebhook(q('device=shellyht-a1&event=humidity.change&rh=55&tC=21.5'));
     expect(p).toEqual({ item: { device: 'shellyht-a1', event: 'humidity.change', params: { rh: '55', tC: '21.5' } }, urgent: false });
   });

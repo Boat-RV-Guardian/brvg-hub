@@ -130,9 +130,9 @@ bench session (2026-08-06) plus standard NMEA/gpsd shapes. Runs in CI (`agent` j
 
 ## Relay tier (X750-class routers) — roll up the Shellys' reports
 
-`RELAY_ENABLED=1` in `/etc/brvg-agent.conf` turns this agent into the **relay tier** of the hub
+`HUB_LITE_ENABLED=1` in `/etc/brvg-agent.conf` turns this agent into the **hub-lite tier** of the hub
 architecture: a LAN-only uhttpd instance serves
-`relay-cgi.sh` at `http://<router>:8181/cgi-bin/report`, the Shellys' webhooks are re-registered
+`hub-lite-cgi.sh` at `http://<router>:8181/cgi-bin/report`, the Shellys' webhooks are re-registered
 against it, and the agent drains the spool into ONE `/api/agent/batch` report per modem interval.
 
 Why: the metered link pays per TLS handshake, not per byte — one roll-up connection replaces one
@@ -146,7 +146,7 @@ Rules that hold regardless of settings:
   spooled for the next drain — never both, so an alarm is never double-reported.
 - Devices whose newest values are UNCHANGED since the last successful report ride the `ok` list
   ("all my devices are good, except these") — a freshness touch, not data.
-- Every `RELAY_KEYFRAME_EVERY`th drain is a full keyframe, bounding how long a lost delta can
+- Every `KEYFRAME_EVERY`th drain is a full keyframe, bounding how long a lost delta can
   leave the cloud's view stale.
 - A failed drain retries with the SAME sequence number, so the cloud can drop a replay whole
   instead of re-firing its alerts.

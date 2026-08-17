@@ -10,7 +10,7 @@ import { pollCradlepoint } from './cradlepoint.js';
 import type { HubConfig } from './config.js';
 import type { Sender } from './sender.js';
 
-export const HUB_VERSION = '0.4.0';
+export const HUB_VERSION = '0.5.0';
 
 /**
  * Consecutive failed drains before /healthz reports UNHEALTHY (503).

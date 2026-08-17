@@ -111,41 +111,41 @@ check "qgdcnt: sent + received bytes" "1048576 2097152" "$out"
 out=$(printf 'ERROR\r\n' | parse_qgdcnt)
 check "qgdcnt: nothing on error" "" "$out"
 
-# --- relay: spool → batch items (the wire contract's shell half) ---
+# --- hub-lite: spool → batch items (the wire contract's shell half) ---
 # The expected strings below are the CANONICAL v1 fixture from brvg-cloud-server's
 # agentBatch.test.ts — copied, not paraphrased. If either side changes shape, one of these two
 # suites goes red; that is the whole one-contract rule.
 out=$(printf '1755000000\tshellyflood-a1\tflood.alarm\ttemp=12.5\n1755000001\tshellyuni-b2\tvoltmeter.measurement\tv=12.6\n' | spool_to_items)
-check "relay: items match the canonical fixture" \
+check "hub-lite: items match the canonical fixture" \
   '[{"device":"shellyflood-a1","event":"flood.alarm","params":{"temp":"12.5"}},{"device":"shellyuni-b2","event":"voltmeter.measurement","params":{"v":"12.6"}}]' \
   "$out"
 
 out=$(printf '1\td1\te.change\tv=a%%2Cb+c%%41\n' | spool_to_items)
-check "relay: urldecode (%2C, +, %41)" '[{"device":"d1","event":"e.change","params":{"v":"a,b cA"}}]' "$out"
+check "hub-lite: urldecode (%2C, +, %41)" '[{"device":"d1","event":"e.change","params":{"v":"a,b cA"}}]' "$out"
 
 out=$(printf '1\td1\te.change\tv=say%%20%%22hi%%22%%5C\n' | spool_to_items)
-check "relay: JSON-escapes quotes and backslashes" '[{"device":"d1","event":"e.change","params":{"v":"say \"hi\"\\"}}]' "$out"
+check "hub-lite: JSON-escapes quotes and backslashes" '[{"device":"d1","event":"e.change","params":{"v":"say \"hi\"\\"}}]' "$out"
 
 out=$(printf '1\td1\te.change\tv=1\n2\td1\te.change\tv=2\n3\td2\te.change\tv=9\n' | spool_to_items)
-check "relay: dedup per device+event keeps the NEWEST" '[{"device":"d1","event":"e.change","params":{"v":"2"}},{"device":"d2","event":"e.change","params":{"v":"9"}}]' "$out"
+check "hub-lite: dedup per device+event keeps the NEWEST" '[{"device":"d1","event":"e.change","params":{"v":"2"}},{"device":"d2","event":"e.change","params":{"v":"9"}}]' "$out"
 
 out=$(printf '1\td1\te.change\tbad;key=1&ok=2\n' | spool_to_items)
-check "relay: junk param keys are stripped, not escaped" '[{"device":"d1","event":"e.change","params":{"badkey":"1","ok":"2"}}]' "$out"
+check "hub-lite: junk param keys are stripped, not escaped" '[{"device":"d1","event":"e.change","params":{"badkey":"1","ok":"2"}}]' "$out"
 
 out=$(printf '1\td1\te.change\n' | spool_to_items)
-check "relay: a line with no params still ships as an item" '[{"device":"d1","event":"e.change","params":{}}]' "$out"
+check "hub-lite: a line with no params still ships as an item" '[{"device":"d1","event":"e.change","params":{}}]' "$out"
 
 out=$(printf '' | spool_to_items)
-check "relay: empty spool is an empty array" '[]' "$out"
+check "hub-lite: empty spool is an empty array" '[]' "$out"
 
 out=$(printf '1\td1\te.change\tv=1\n2\td2\tf.change\tv=1\n3\td1\tg.alarm\tv=1\n' | spool_devices)
-check "relay: spool_devices dedups in first-seen order" 'd1
+check "hub-lite: spool_devices dedups in first-seen order" 'd1
 d2' "$out"
 
 AGENT_VERSION_SAVED="$AGENT_VERSION"
 out=$(build_batch_json 42 delta '[{"device":"d1","event":"e.change","params":{}}]' "okdev1 okdev2" bootxyz)
-check "relay: envelope carries seq/boot/kind/ok/tier" \
-  "{\"v\":1,\"seq\":42,\"boot\":\"bootxyz\",\"kind\":\"delta\",\"items\":[{\"device\":\"d1\",\"event\":\"e.change\",\"params\":{}}],\"ok\":[\"okdev1\",\"okdev2\"],\"agent\":{\"av\":\"$AGENT_VERSION_SAVED\",\"tier\":\"relay\"}}" \
+check "hub-lite: envelope carries seq/boot/kind/ok/tier" \
+  "{\"v\":1,\"seq\":42,\"boot\":\"bootxyz\",\"kind\":\"delta\",\"items\":[{\"device\":\"d1\",\"event\":\"e.change\",\"params\":{}}],\"ok\":[\"okdev1\",\"okdev2\"],\"agent\":{\"av\":\"$AGENT_VERSION_SAVED\",\"tier\":\"hub-lite\"}}" \
   "$out"
 
 # --- boot id -----------------------------------------------------------------------------------
@@ -158,15 +158,15 @@ _bootdir=$(mktemp -d)
 # was sourced, and `VAR=x some_function` LEAKS in POSIX sh (it broke the --version test on 2026-08-13).
 _b1=$( RELAY_BOOT_FILE="$_bootdir/boot"; relay_boot_id )
 _b2=$( RELAY_BOOT_FILE="$_bootdir/boot"; relay_boot_id )
-check "relay: boot id is stable within a boot" "$_b1" "$_b2"
-check "relay: boot id is non-empty" "yes" "$([ -n "$_b1" ] && echo yes)"
-check "relay: boot id is safe to put in JSON unescaped" "" "$(printf '%s' "$_b1" | tr -d 'A-Za-z0-9')"
+check "hub-lite: boot id is stable within a boot" "$_b1" "$_b2"
+check "hub-lite: boot id is non-empty" "yes" "$([ -n "$_b1" ] && echo yes)"
+check "hub-lite: boot id is safe to put in JSON unescaped" "" "$(printf '%s' "$_b1" | tr -d 'A-Za-z0-9')"
 rm -f "$_bootdir/boot"     # what a reboot does to tmpfs
 _b3=$( RELAY_BOOT_FILE="$_bootdir/boot"; relay_boot_id )
 # Only meaningful where the id is random per boot; on a host exposing /proc/sys/kernel/random/boot_id
 # the kernel value is legitimately identical until the MACHINE reboots, so accept either.
 if [ ! -r /proc/sys/kernel/random/boot_id ]; then
-  check "relay: a wiped tmpfs yields a NEW boot id" "differs" \
+  check "hub-lite: a wiped tmpfs yields a NEW boot id" "differs" \
     "$([ "$_b3" != "$_b1" ] && echo differs || echo same)"
 fi
 rm -rf "$_bootdir"
@@ -175,14 +175,14 @@ rm -rf "$_bootdir"
 if command -v python3 >/dev/null 2>&1; then
   _all_json=$(build_batch_json 1 keyframe "$(printf '1\td1\te.change\tv=say%%20%%22hi%%22%%5C&n=1.5\n' | spool_to_items)" "a b" bootxyz)
   _roundtrip=$(printf '%s' "$_all_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["items"][0]["params"]["v"] + "|" + d["items"][0]["params"]["n"])' 2>/dev/null)
-  check "relay: envelope is valid JSON and the escaped value ROUND-TRIPS" 'say "hi"\|1.5' "$_roundtrip"
+  check "hub-lite: envelope is valid JSON and the escaped value ROUND-TRIPS" 'say "hi"\|1.5' "$_roundtrip"
 fi
 
 # --- relay CGI (run for real: no conf ⇒ the urgent path cannot send, so everything spools) ---
 _cgidir=$(mktemp -d)
 run_cgi() {
   QUERY_STRING="$1" BRVG_AGENT_CONF=/nonexistent-conf BRVG_RELAY_SPOOL="$_cgidir/spool" \
-    sh "$(dirname "$0")/relay-cgi.sh" >/dev/null 2>&1
+    sh "$(dirname "$0")/hub-lite-cgi.sh" >/dev/null 2>&1
 }
 run_cgi 'device=shellyflood-a1&event=flood.alarm&temp=12%2C5'
 run_cgi 'device=shellyht-c3&event=humidity.change&rh=55'

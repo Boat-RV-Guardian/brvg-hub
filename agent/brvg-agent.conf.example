@@ -36,12 +36,12 @@ GPS_DEVICE=""
 # this agent rolls them up into ONE cloud report per interval — the metered link pays per TLS
 # handshake, not per byte, so fewer connections is the whole saving. Alarms are never held: the
 # receiver sends them to the cloud immediately, on their own.
-RELAY_ENABLED=0
+HUB_LITE_ENABLED=0
 # LAN port the receiver listens on (the WAN zone drops inbound by default; LAN-only regardless).
-RELAY_PORT=8181
+RECEIVER_PORT=8181
 # Every Nth drain sends a full keyframe instead of a delta, bounding how long a lost report can
 # leave the cloud's view stale.
-RELAY_KEYFRAME_EVERY=6
+KEYFRAME_EVERY=6
 
 # --- Hub watchdog (fail open) -------------------------------------------------------------------
 # Only for a hub running on a SEPARATE box (a Pi, Docker, the desktop app). When the hub runs on
