@@ -1,0 +1,25 @@
+# systemd unit for the BRVG hub on a Pi / bare Linux (Docker users don't need this).
+#   sudo cp brvg-hub.service /etc/systemd/system/
+#   sudo systemctl enable --now brvg-hub
+# Config lives in /etc/brvg-hub.env (VID=…, DEVICE_ID=…, DEVICE_TOKEN=…, WORKER_URL=…), 0600.
+
+[Unit]
+Description=Boat & RV Guardian hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/brvg-hub.env
+ExecStart=/usr/bin/node /opt/brvg-hub/dist/index.js
+Restart=always
+RestartSec=30
+# Least privilege — the hub only needs to listen on a LAN port and make outbound HTTPS.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

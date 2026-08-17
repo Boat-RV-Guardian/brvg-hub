@@ -1,0 +1,55 @@
+# BRVG phone-home agent configuration. Copy to /etc/brvg-agent.conf and chmod 600 — the vehicle
+# key authenticates telemetry writes for this vehicle and must not be world-readable.
+
+# The vehicle this device reports into (Settings → the vehicle's id) and this device's id in it.
+VID=""
+DEVICE_ID=""
+
+# PREFERRED: the per-device token minted by POST /api/agent/enroll (admin-only; shown once).
+# Individually revocable — a leaked token exposes only this device's telemetry write path.
+DEVICE_TOKEN=""
+
+# Legacy fallback when DEVICE_TOKEN is empty: the vehicle webhook key (sh_webhook_secret — the
+# same k= every Shelly webhook carries). Works, but is shared vehicle-wide.
+VEHICLE_KEY=""
+
+# Hosted worker. Must be https.
+WORKER_URL="https://api.boatrvguardian.com"
+
+# Cadences (seconds). Floors: GPS 30, modem 60. These ride the customer's metered link —
+# every tick is one small HTTPS GET.
+GPS_INTERVAL=120
+MODEM_INTERVAL=600
+
+# GPS source: auto (GL.iNet → modem AT; else gpsd if present; else NMEA serial), at, gpsd, nmea.
+GPS_SOURCE=auto
+
+# Modem AT port. GL-X750: /dev/ttyUSB2. X3000-class (PCIe RM520): check `ls /dev/mhi_*` — see
+# agent/README.md. Leave as-is on a Pi with no cellular HAT (modem telemetry is skipped).
+AT_PORT=/dev/ttyUSB2
+
+# Raw NMEA serial device for GPS_SOURCE=nmea (e.g. a u-blox USB dongle: /dev/ttyACM0).
+GPS_DEVICE=""
+
+# --- Relay (X750-class routers — HUB-PROXY.md relay tier) ---------------------------------------
+# When enabled, a small LAN-only web listener (uhttpd) receives the Shellys' webhooks locally and
+# this agent rolls them up into ONE cloud report per interval — the metered link pays per TLS
+# handshake, not per byte, so fewer connections is the whole saving. Alarms are never held: the
+# receiver sends them to the cloud immediately, on their own.
+RELAY_ENABLED=0
+# LAN port the receiver listens on (the WAN zone drops inbound by default; LAN-only regardless).
+RELAY_PORT=8181
+# Every Nth drain sends a full keyframe instead of a delta, bounding how long a lost report can
+# leave the cloud's view stale.
+RELAY_KEYFRAME_EVERY=6
+
+# --- Hub watchdog (fail open) -------------------------------------------------------------------
+# Only for a hub running on a SEPARATE box (a Pi, Docker, the desktop app). When the hub runs on
+# this router the failure domains already coincide and this is pointless.
+#
+# Under a "traffic" lockdown the hub is the only path to the cloud, so if it dies the vehicle goes
+# silent. The router watches its health endpoint and, after HUB_WATCH_FAILS consecutive failures,
+# RELEASES the lockdown rules so reporting resumes — and tells you it did. It does NOT re-arm on
+# recovery (a flapping hub would thrash the firewall); re-apply from the app when you're ready.
+HUB_WATCH_URL=""            # e.g. http://192.168.8.50:8181/healthz — empty disables the watchdog
+HUB_WATCH_FAILS=5           # consecutive failed checks before failing open (one check per modem tick)
