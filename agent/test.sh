@@ -244,6 +244,14 @@ check "watchdog: past the threshold ⇒ release" release "$(watch_decide 0 9 5 0
 # every tick for as long as the hub stays down.
 check "watchdog: already released ⇒ never release again" none "$(watch_decide 0 99 5 1)"
 
+# --- bandwidth saver gate: watchdog must not probe or write state ----------------------------
+_bw_dir=$(mktemp -d)
+# HUB_WATCH_FAILS_FILE, not BRVG_HUB_FAILS: the env override was already expanded when the agent
+# was sourced (same trap as the boot-id test above).
+( BANDWIDTH_SAVER=1 HUB_WATCH_URL="http://127.0.0.1:1/healthz" HUB_WATCH_FAILS_FILE="$_bw_dir/fails" \
+  HUB_WATCH_RELEASED="$_bw_dir/released"; watch_hub )
+check "bandwidth saver: watchdog is inert (no state written)" "absent" "$( [ -e "$_bw_dir/fails" ] && echo present || echo absent )"
+
 # --- release_lockdown against a stand-in uci -------------------------------------------------
 # The real thing needs a router; this proves the REVERSE-INDEX deletion is right (uci renumbers on
 # every delete, so forward iteration silently skips rules) and that a hand-written rule survives.

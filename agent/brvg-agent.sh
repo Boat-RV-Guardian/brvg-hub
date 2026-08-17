@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.5.0"
+AGENT_VERSION="0.7.0"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -613,6 +613,10 @@ release_lockdown() {
 }
 
 watch_hub() {
+  # BANDWIDTH SAVER MODE FAILS CLOSED (owner, 2026-08-17): when lockdown exists to control
+  # metered-SIM spend, a dead hub must NOT release it — silence until the connectivity-offline
+  # alert is the accepted failure mode. The gate also skips the probe itself: no curl per tick.
+  [ "${BANDWIDTH_SAVER:-0}" = "1" ] && return 0
   [ -n "${HUB_WATCH_URL:-}" ] || return 0
   _threshold="${HUB_WATCH_FAILS:-5}"
   _fails=$( (cat "$HUB_WATCH_FAILS_FILE" 2>/dev/null || echo 0) | tr -cd '0-9' )

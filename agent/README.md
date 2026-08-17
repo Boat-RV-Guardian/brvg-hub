@@ -156,9 +156,14 @@ confirm `uhttpd` is present on a FACTORY-RESET X750 (it was present on the bench
 had packages added); if not stock, it becomes a `Depends:` in the .ipk.
 
 
-## Hub watchdog — failing open instead of going silent
+## Hub watchdog — failing open, except in bandwidth saver mode
 
-Owner decision 2026-08-13. Under a *traffic* lockdown the hub is the only route to the cloud. If
+Owner decisions 2026-08-13 + 2026-08-17. **`BANDWIDTH_SAVER=1` disables the watchdog entirely and
+lockdown FAILS CLOSED**: when lockdown exists to control metered-SIM spend, a dead hub must not
+release it — a silent vessel until the connectivity-offline alert fires is the accepted trade.
+Everything below applies only to normal (non-saver) installs.
+
+Under a *traffic* lockdown the hub is the only route to the cloud. If
 the hub runs on this router that is fine — a dead router is a dead gateway either way — but a hub
 on a **separate** box (Pi, Docker, desktop) can die while the router routes happily, and then the
 vessel is silent with no remote way back in.

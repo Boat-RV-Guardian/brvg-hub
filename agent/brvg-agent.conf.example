@@ -43,7 +43,14 @@ RECEIVER_PORT=8181
 # leave the cloud's view stale.
 KEYFRAME_EVERY=6
 
-# --- Hub watchdog (fail open) -------------------------------------------------------------------
+# --- Bandwidth saver mode -----------------------------------------------------------------------
+# When lockdown is armed to control metered-SIM spend (not merely to structure the LAN), set this
+# to 1: the hub watchdog below is DISABLED and lockdown FAILS CLOSED — a dead hub means a silent
+# vessel until the connectivity-offline alert fires, which is the accepted trade. Also the mode
+# where a management tunnel must stay off. 0 = normal: the watchdog (if configured) fails open.
+BANDWIDTH_SAVER=0
+
+# --- Hub watchdog (fail open — unless BANDWIDTH_SAVER=1 above) ----------------------------------
 # Only for a hub running on a SEPARATE box (a Pi, Docker, the desktop app). When the hub runs on
 # this router the failure domains already coincide and this is pointless.
 #
