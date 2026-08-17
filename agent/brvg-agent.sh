@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.8.0"
+AGENT_VERSION="0.9.0"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -84,6 +84,20 @@ parse_nmea_rmc() {
     # to ~4 decimals (~11 m). Verified live on a u-blox 7 (bench 2026-08-13).
     out = sprintf("%.5f %.5f", lat, lon)
   } END { if (out != "") print out }'
+}
+
+# NCOS /api/status/gps → "lat lon". Bench shape (CBA850 fw 7.0.50, captured 2026-08-17): DMS
+# objects with the SIGN riding on degree:
+#   {"success":true,"data":{"fix":{"latitude":{"degree":41,"minute":29,"second":34.52},...}}}
+# Same %.5f (≈1 m) as every other GPS parser here. A 0,0 placeholder is "no fix yet" → no output.
+parse_cradlepoint_gps() {
+  tr -d ' \n\t' | sed -n 's/.*"latitude":{"degree":\(-\{0,1\}[0-9.]*\),"minute":\([0-9.]*\),"second":\([0-9.]*\)}.*"longitude":{"degree":\(-\{0,1\}[0-9.]*\),"minute":\([0-9.]*\),"second":\([0-9.]*\)}.*/\1 \2 \3 \4 \5 \6/p' \
+    | awk '{
+        alat = ($1 < 0 ? -$1 : $1); lat = ($1 < 0 ? -1 : 1) * (alat + $2 / 60 + $3 / 3600)
+        alon = ($4 < 0 ? -$4 : $4); lon = ($4 < 0 ? -1 : 1) * (alon + $5 / 60 + $6 / 3600)
+        if (lat == 0 && lon == 0) exit
+        printf "%.5f %.5f\n", lat, lon
+      }'
 }
 
 # gpsd TPV JSON (gpspipe -w) → "lat lon [acc]" from the last 2D/3D fix.
@@ -345,11 +359,31 @@ read_nmea_device() {
   timeout 6 head -c 4096 "$_dev" 2>/dev/null | parse_nmea_rmc
 }
 
+# NMEA over TCP — a chartplotter, AIS, gpsd, or a router serving NMEA on the LAN (GPS parity with
+# the hub's NMEA_HOST source; owner sprint 2026-08-17). The agent is always the CLIENT.
+# ⚠️ BENCH-VERIFY before shipping to customers: busybox `nc` on FACTORY-STOCK GL.iNet firmware
+# (the manual-Lua trap — the bench box has extra packages). Tracked in open-tasks 📡.
+read_gps_tcp() {
+  [ -n "$GPS_HOST" ] || return 1
+  command -v nc >/dev/null 2>&1 || { log "GPS_SOURCE=tcp needs nc (not found)"; return 1; }
+  nc -w 8 "$GPS_HOST" "${GPS_PORT:-10110}" 2>/dev/null | head -n 40 | parse_nmea_rmc
+}
+
+# Cradlepoint NCOS local HTTP poll (the hub's CRADLEPOINT_HOST source, in shell): the router is
+# POLLED, never configured to send anywhere (owner ruling 2026-08-17).
+read_gps_cradlepoint() {
+  [ -n "$CRADLEPOINT_HOST" ] || return 1
+  curl -fsS --max-time 10 -u "${CRADLEPOINT_USER:-admin}:${CRADLEPOINT_PASSWORD:-}" \
+    "http://${CRADLEPOINT_HOST}:${CRADLEPOINT_PORT:-80}/api/status/gps" 2>/dev/null | parse_cradlepoint_gps
+}
+
 collect_gps() {
   case "$GPS_SOURCE" in
     at) at_cmd 'AT+QGPSLOC=2' 3 | parse_qgpsloc ;;
     gpsd) command -v gpspipe >/dev/null 2>&1 && gpspipe -w -n 8 2>/dev/null | parse_gpsd_tpv ;;
     nmea) read_nmea_device ;;
+    tcp) read_gps_tcp ;;
+    cradlepoint) read_gps_cradlepoint ;;
     auto)
       # Modem GNSS first (no extra hardware), then a USB dongle, then gpsd. The fallback ORDER is
       # the point: a router with no GPS antenna port answers the AT read forever with "no fix",
