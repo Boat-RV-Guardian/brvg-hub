@@ -550,8 +550,11 @@ send_event() {
   _url=$(build_report_url "$1" "$2")
   [ -n "$PENDING_ACK" ] && _url="${_url}&ack=${PENDING_ACK}"
   _resp=$(curl -fsS --max-time 15 "$_url" 2>/dev/null)
-  if [ $? -ne 0 ]; then
-    log "send $1 failed (will retry next tick)"
+  _rc=$?
+  if [ $_rc -ne 0 ]; then
+    # rc in the log (2026-08-17 bench): "failed" alone made a live send failure undiagnosable —
+    # 22=HTTP error (worker rejected it: look at the URL), 6=DNS, 7/28=connectivity, 3=bad URL.
+    log "send $1 failed (curl rc=$_rc; will retry next tick)"
     return 1
   fi
   PENDING_ACK=""   # the worker saw our acks; anything still queued comes back below
