@@ -16,6 +16,25 @@ A hub-lite is a **subset of a hub, never a variant**: both speak the same batch 
 the shared fixtures in each side's tests are what keep them from drifting. If you change the
 contract in one place, a test goes red somewhere else — keep it that way.
 
+## Architecture
+
+![One wire contract, two collectors — sensors report to a hub or hub-lite on the LAN, which batches to the Guardian cloud; alarms are never batched](docs/diagrams/overview.svg)
+
+## Five ways to deploy a collector
+
+The same contract runs everywhere a collector can live. Solid borders are runnable today from this
+repo; dashed ones are on the [public roadmap](https://www.boatrvguardian.com/roadmap).
+
+![1 — Hub on a Raspberry Pi or Docker box behind any router](docs/diagrams/s1-hub-box.svg)
+
+![2 — Hub-lite running on the boat's cellular router](docs/diagrams/s2-router-relay.svg)
+
+![3 — Hub hosted inside the Guardian desktop app (planned)](docs/diagrams/s3-desktop-hub.svg)
+
+![4 — Hub-lite on a phone or tablet acting as the hotspot (planned)](docs/diagrams/s4-phone-hub.svg)
+
+![5 — Shared hub at the marina serving many boats over long-range sensors (planned)](docs/diagrams/s5-marina-hub.svg)
+
 ## Integrating
 
 The collectors report over outbound HTTPS only (nothing here listens on the WAN; CGNAT-friendly).
