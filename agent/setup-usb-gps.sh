@@ -16,6 +16,8 @@
 # installed, and opkg needs working internet at that moment. Idempotent — plug it in, run it, done.
 #
 # Usage:  sh setup-usb-gps.sh [--device /dev/ttyACM0] [--port 10110] [--baud 9600]
+#         sh setup-usb-gps.sh --force-install   (reinstall the kernel modules even if a receiver
+#                                                is already visible — the app's "Reinstall" path)
 #         sh setup-usb-gps.sh --status
 #         sh setup-usb-gps.sh --remove
 
@@ -25,15 +27,17 @@ PORT=10110
 BAUD=9600
 DEVICE=""
 ACTION="install"
+FORCE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --device) DEVICE="$2"; shift 2 ;;
     --port)   PORT="$2"; shift 2 ;;
     --baud)   BAUD="$2"; shift 2 ;;
+    --force-install) FORCE=1; shift ;;
     --status) ACTION="status"; shift ;;
     --remove) ACTION="remove"; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -70,14 +74,16 @@ fi
 [ "$(id -u)" = "0" ] || die "run as root"
 command -v opkg >/dev/null 2>&1 || die "this script targets OpenWrt (no opkg found)"
 
-# Kernel modules, only if no receiver is visible yet. A dongle that already enumerated needs
-# nothing installed, and opkg update on a metered link is not free.
-if [ -z "$DEVICE" ] && ! find_device >/dev/null 2>&1; then
-  log "no serial receiver visible — installing USB serial kernel modules"
+# Kernel modules, only if no receiver is visible yet (or --force-install, the app's Reinstall
+# path). A dongle that already enumerated needs nothing installed, and opkg update on a metered
+# link is not free.
+if [ -n "$FORCE" ] || { [ -z "$DEVICE" ] && ! find_device >/dev/null 2>&1; }; then
+  log "installing USB serial kernel modules${FORCE:+ (forced reinstall)}"
   opkg update >/dev/null 2>&1 || die "opkg update failed — is the router online?"
   # CDC-ACM covers u-blox (VK-162 / BU-353S4 class); the others cover FTDI/Prolific receivers.
+  # A forced run re-installs even packages opkg considers current — that IS the repair path.
   for m in kmod-usb-acm kmod-usb-serial-ftdi kmod-usb-serial-pl2303; do
-    opkg install "$m" >/dev/null 2>&1 || log "note: $m unavailable or already present"
+    opkg install ${FORCE:+--force-reinstall} "$m" >/dev/null 2>&1 || log "note: $m unavailable or already present"
   done
   sleep 2   # give the kernel a moment to enumerate the device node
 fi
