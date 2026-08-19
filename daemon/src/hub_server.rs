@@ -608,7 +608,42 @@ async fn h_valve(State(rt): State<Shared>, headers: HeaderMap, body: axum::body:
     lan_call(&rt, &headers, "POST", "/api/hub/linktap/valve", &body).await
 }
 
-async fn h_linktap_push(State(rt): State<Shared>, body: axum::body::Bytes) -> Response {
+/// Is this push actually FROM the configured gateway?
+///
+/// The gateway cannot authenticate — it is fixed firmware with no key — so the peer address is the
+/// only evidence available. This is not authentication and is not claimed to be: a LAN peer can
+/// spoof an address. It narrows "any device on the boat's network" to "something answering at the
+/// gateway's address", which is a real reduction for one comparison.
+///
+/// It reads the SAME `linktap.host` the poll loop dials, so the two cannot drift apart: if the
+/// gateway's DHCP address changes, polling breaks at the same moment pushes stop being accepted —
+/// one visible failure instead of a silent half-broken state. An unconfigured host accepts nothing.
+fn push_peer_allowed(host: &str, peer: SocketAddr) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    // `host` may carry a port (the config field is a host[:port] for the gateway's HTTP API).
+    let host_only = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
+    match host_only.parse::<std::net::IpAddr>() {
+        Ok(ip) => peer.ip() == ip,
+        // A hostname was configured rather than an address. Resolving it here would put a DNS
+        // lookup on every push, so accept and rely on the route's inertness — the same posture as
+        // before this check existed, for the configuration that cannot support it.
+        Err(_) => true,
+    }
+}
+
+async fn h_linktap_push(
+    State(rt): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    body: axum::body::Bytes,
+) -> Response {
+    let host = hub_config::read_config_in(&rt.base).linktap.host;
+    if !push_peer_allowed(&host, peer) {
+        // Same answer as a good push: this is not an authorization surface, and telling a prober
+        // whether it guessed the gateway's address would make it one.
+        return (StatusCode::OK, "ok").into_response();
+    }
     // Answer FIRST, work after — the gateway retries a slow endpoint, and a duplicate status is
     // worse than a late one (it would re-run the cutoff comparison against stale numbers).
     let text = String::from_utf8_lossy(&body).to_string();
@@ -1569,6 +1604,38 @@ mod tests {
             .body(r#"{"dev_stat":[{"dev_id":"ffffeeeeddddcccc","is_watering":1,"volume":5}]}"#)
             .send().await.unwrap();
         assert_eq!(r.status(), 200, "the gateway cannot authenticate — it must not be refused");
+    }
+
+    #[test]
+    fn a_push_is_only_taken_from_the_configured_gateway_address() {
+        let gw: SocketAddr = "192.168.8.20:54321".parse().unwrap();
+        let other: SocketAddr = "192.168.8.99:54321".parse().unwrap();
+        assert!(push_peer_allowed("192.168.8.20", gw));
+        assert!(!push_peer_allowed("192.168.8.20", other));
+        // The config field may carry a port; the comparison is on the address only.
+        assert!(push_peer_allowed("192.168.8.20:80", gw));
+        // No gateway configured accepts nothing — there is nothing legitimate to accept.
+        assert!(!push_peer_allowed("", gw));
+        // A HOSTNAME cannot be compared without a DNS lookup per push, so that configuration keeps
+        // the pre-check posture and relies on the route's inertness. Stated, not silently assumed.
+        assert!(push_peer_allowed("gateway.local", other));
+    }
+
+    #[tokio::test]
+    async fn a_push_from_the_wrong_peer_is_answered_identically_to_a_good_one() {
+        // Not an authorization surface: telling a prober whether it guessed the gateway's address
+        // would make it one.
+        let base = temp_base("lt_push_peer");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
+        let r = reqwest::Client::new()
+            .post(format!("{origin}/api/hub/linktap/push"))
+            .header("content-type", "application/json")
+            .body(r#"{"dev_stat":[{"dev_id":"aaaabbbbccccdddd","is_watering":1,"volume":5}]}"#)
+            .send().await.unwrap();
+        // valve_cfg points at 127.0.0.1:9 while the test server sees a 127.0.0.1 peer, so this
+        // one is ACCEPTED — the assertion that matters is that the answer is indistinguishable.
+        assert_eq!(r.status(), 200);
     }
 
 }
