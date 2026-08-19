@@ -37,6 +37,7 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use crate::hub_config::{self, HubConfig, MemberKey};
+use crate::linktap;
 
 /// Production worker base — the Rust twin of DEFAULT_WORKER_URL (configSync.ts). Pinned for the
 /// same reason as the TS side: this process holds a credential, so it talks only to first party.
@@ -93,6 +94,14 @@ pub fn may_configure(role: &str) -> bool {
 }
 pub fn may_administer(role: &str) -> bool {
     matches!(role, "owner" | "coowner")
+}
+
+/// Actuating a device is control-grade, mirroring the app's vehicleCapabilities `control_devices`:
+/// a `monitor` may look, everyone above may act. Deliberately NOT may_configure — opening a valve
+/// is not the same authority as changing the hub's settings, and conflating them would silently
+/// promote every `control` member to a configurer.
+pub fn may_control(role: &str) -> bool {
+    matches!(role, "owner" | "coowner" | "admin" | "control")
 }
 
 // --- Wire ---------------------------------------------------------------------------------------
@@ -180,6 +189,7 @@ pub fn router(rt: Shared) -> Router {
         .route("/api/hub/config", post(h_config))
         .route("/api/hub/token", post(h_token))
         .route("/api/hub/clear", post(h_clear))
+        .route("/api/hub/linktap/valve", post(h_valve))
         // First-run only, and only from this machine — see h_identity.
         .route("/api/hub/ping", get(h_ping))
         .route("/api/hub/identity", get(h_identity))
@@ -203,6 +213,10 @@ struct StatusBody {
     platform: String,
     uptime_secs: u64,
     keys_synced: usize,
+    /// What this hub can actually DO. The app routes valve control through the hub ONLY when this
+    /// contains "linktap" (app #412 utils/valveExecutor) — absence is never read as capability, so
+    /// an older daemon or an unpermitted vehicle simply keeps the app on its direct paths.
+    capabilities: Vec<String>,
 }
 
 async fn status_body(rt: &Rt) -> StatusBody {
@@ -219,7 +233,19 @@ async fn status_body(rt: &Rt) -> StatusBody {
         platform: std::env::consts::OS.into(),
         uptime_secs: rt.started.elapsed().as_secs(),
         keys_synced: rt.keys.read().await.len(),
+        capabilities: capabilities_of(&cfg.linktap),
     }
+}
+
+/// The capability list. `linktap` requires BOTH a configured gateway AND the cloud's permission
+/// (the paid gate, cached from the worker) — either missing means the hub does not claim it, and
+/// the app keeps using its direct paths. Two conditions, one AND, so neither can be forgotten.
+fn capabilities_of(lt: &hub_config::LinkTapConfig) -> Vec<String> {
+    let mut caps = Vec::new();
+    if lt.allowed && !lt.host.is_empty() && !lt.gw_id.is_empty() {
+        caps.push("linktap".to_string());
+    }
+    caps
 }
 
 #[derive(Deserialize)]
@@ -280,6 +306,7 @@ pub async fn dispatch(rt: &Rt, caller: &Caller, method: &str, path: &str, body: 
         ("POST", "/api/hub/config") => do_config(rt, caller, body).await,
         ("POST", "/api/hub/token") => do_token(rt, caller, body).await,
         ("POST", "/api/hub/clear") => do_clear(rt, caller).await,
+        ("POST", "/api/hub/linktap/valve") => do_valve(rt, caller, body).await,
         _ => err(404, "no such hub endpoint"),
     }
 }
@@ -536,6 +563,10 @@ async fn h_clear(State(rt): State<Shared>, headers: HeaderMap) -> Response {
     lan_call(&rt, &headers, "POST", "/api/hub/clear", b"").await
 }
 
+async fn h_valve(State(rt): State<Shared>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    lan_call(&rt, &headers, "POST", "/api/hub/linktap/valve", &body).await
+}
+
 // --- Loops --------------------------------------------------------------------------------------
 
 fn http_client() -> reqwest::Client {
@@ -625,6 +656,103 @@ pub fn run_headless() {
             }
         }
     });
+}
+
+
+// --- Valve control (owner ruling 2026-08-19: with a hub present the control plane runs THROUGH
+// it, never app -> device) ------------------------------------------------------------------------
+//
+// WHY THE APP ROUTES HERE AT ALL: an onsite executor adopts any cycle it did not start as a NORMAL
+// RUN and enforces the Normal Run cap. While the app also opens valves directly, that executor
+// cannot tell an app-started WASHDOWN (time-only, must never be volume-cut) from a physical button
+// press. Routing through removes the ambiguity at its source — and `mode` below is the fact the
+// hub could never infer by watching.
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ValveReq {
+    dev_id: String,
+    /// "open" | "close".
+    action: String,
+    duration_secs: Option<u64>,
+    /// Litres. ABSENT for a washdown — the key's absence IS the time-only signal, never a zero.
+    volume_cap_l: Option<f64>,
+    /// "normal" | "washdown" | "tankfill". Absent is treated as normal.
+    mode: Option<String>,
+}
+
+async fn do_valve(rt: &Rt, caller: &Caller, body: &[u8]) -> Answer {
+    if !may_control(&caller.role) {
+        return err(403, "controlling a valve needs control access or above");
+    }
+    let req: ValveReq = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return err(422, &format!("invalid JSON body: {e}")),
+    };
+
+    let cfg = hub_config::read_config_in(&rt.base);
+    // The paid gate again, at the ACTION not just the advertisement: a caller that skipped the
+    // capability check (an older app, a hand-rolled request) must still be refused. Cheap, and it
+    // means the gate cannot be bypassed by not asking.
+    if !cfg.linktap.allowed {
+        return err(402, "this vehicle's plan does not include valve control");
+    }
+    if cfg.linktap.host.is_empty() || cfg.linktap.gw_id.is_empty() {
+        return err(409, "no LinkTap gateway is configured on this hub");
+    }
+    let dev_id = linktap::normalize_dev_id(&req.dev_id);
+    if dev_id.is_empty() {
+        return err(422, "devId is required");
+    }
+    // Only valves this hub was told about — a hub is not a general-purpose proxy onto the
+    // vessel's RF network, the same reasoning as the relay's path allowlist.
+    if !cfg.linktap.dev_ids.iter().any(|d| linktap::normalize_dev_id(d) == dev_id) {
+        return err(404, "that valve is not configured on this hub");
+    }
+
+    let gw = linktap::Gateway { host: cfg.linktap.host.clone(), gw_id: cfg.linktap.gw_id.clone() };
+    let client = reqwest::Client::new();
+
+    let body_json = match req.action.as_str() {
+        "close" => linktap::build_stop(&gw, &dev_id),
+        "open" => {
+            let secs = match req.duration_secs {
+                Some(s) if s > 0 => s,
+                _ => return err(422, "durationSecs is required to open a valve"),
+            };
+            // ⚠️ A WASHDOWN IS TIME-ONLY (owner spec 2026-07-30, re-ratified twice). Mode decides
+            // the cap, NOT the presence of a number: a volumeCapL sent alongside mode=washdown is
+            // a caller bug, and honouring it would re-create the "external cap" that cut 2-hour
+            // hose runs at ~26 gal. Refuse it rather than silently dropping either side.
+            let mode = req.mode.as_deref().unwrap_or("normal");
+            if mode == "washdown" && req.volume_cap_l.is_some() {
+                return err(422, "a washdown is time-limited only — do not send volumeCapL with mode=washdown");
+            }
+            // The cap must be expressed in the GATEWAY's unit, so read it — one extra
+            // round-trip on a user-initiated action, where being right beats being fast.
+            // read_vol_unit defaults to GALLONS when unreadable, because guessing litres
+            // under-reports a cap by 3.79x and the cutoff compares against that number.
+            let cap_gw = match (mode, req.volume_cap_l) {
+                ("washdown", _) | (_, None) => None,
+                (_, Some(l)) => {
+                    let unit = linktap::read_vol_unit(&client, &gw).await;
+                    Some(unit.from_litres(l))
+                }
+            };
+            linktap::build_start(&gw, &dev_id, secs, cap_gw)
+        }
+        other => return err(422, &format!("unknown action '{other}' — expected open or close")),
+    };
+
+    let reply = linktap::post_command(&client, &gw, &body_json).await;
+    if !reply.ok {
+        let detail = reply.error.unwrap_or_else(|| "the gateway refused the command".into());
+        eprintln!("linktap: {} {} failed: {detail}", req.action, dev_id);
+        // 502: the hub is fine, the thing BEHIND it refused. The app falls back and says so.
+        return err(502, &format!("the gateway did not accept that command: {detail}"));
+    }
+    eprintln!("linktap: {} {} ok", req.action, dev_id);
+    ok_json(&serde_json::json!({ "ok": true }))
 }
 
 #[cfg(test)]
@@ -812,7 +940,7 @@ mod tests {
         hub_config::write_config_in(&base, &seeded_cfg()).unwrap();
         let (origin, _rt) = spawn_server(base.clone(), vec![key("coowner")]).await;
         let c = reqwest::Client::new();
-        for path in ["/api/hub/config", "/api/hub/token"] {
+        for path in ["/api/hub/config", "/api/hub/token", "/api/hub/linktap/valve"] {
             // Garbage body, no key: the answer must be 401, never a parser complaint. An
             // unauthenticated caller must not reach the deserializer at all.
             let r = c.post(format!("{origin}{path}"))
@@ -963,4 +1091,121 @@ mod tests {
         let client = reqwest::Client::new();
         send_heartbeat_once(&client, &format!("http://{addr}"), &seeded_cfg()).await.unwrap();
     }
+    // --- Valve control through the hub -----------------------------------------------------------
+
+    fn valve_cfg(allowed: bool) -> HubConfig {
+        HubConfig {
+            linktap: hub_config::LinkTapConfig {
+                host: "127.0.0.1:9".into(), // reserved discard port — never answers, which is fine:
+                gw_id: "GW02".into(),        // every test here asserts a decision made BEFORE the call
+                dev_ids: vec!["aaaabbbbccccdddd".into()],
+                allowed,
+            },
+            ..seeded_cfg()
+        }
+    }
+
+    async fn post_valve(origin: &str, k: &MemberKey, body: &str) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(format!("{origin}/api/hub/linktap/valve"))
+            .header(KEY_HEADER, k.key.clone())
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send().await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn capabilities_advertise_linktap_only_when_configured_AND_permitted() {
+        // The two conditions are ANDed so neither can be forgotten: a configured gateway on an
+        // unpermitted plan must not advertise, and a permitted plan with no gateway must not either.
+        let base = temp_base("caps");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!("{origin}/api/hub/status")).header(KEY_HEADER, key("owner").key)
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(body["capabilities"], serde_json::json!(["linktap"]));
+
+        let base2 = temp_base("caps_denied");
+        hub_config::write_config_in(&base2, &valve_cfg(false)).unwrap();
+        let (origin2, _rt2) = spawn_server(base2, vec![key("owner")]).await;
+        let body2: serde_json::Value = reqwest::Client::new()
+            .get(format!("{origin2}/api/hub/status")).header(KEY_HEADER, key("owner").key)
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(body2["capabilities"], serde_json::json!([]), "an unpermitted plan must not advertise valve capability");
+
+        let base3 = temp_base("caps_nogw");
+        hub_config::write_config_in(&base3, &seeded_cfg()).unwrap(); // allowed defaults false, no gateway
+        let (origin3, _rt3) = spawn_server(base3, vec![key("owner")]).await;
+        let body3: serde_json::Value = reqwest::Client::new()
+            .get(format!("{origin3}/api/hub/status")).header(KEY_HEADER, key("owner").key)
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(body3["capabilities"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn the_paid_gate_is_enforced_at_the_action_not_only_the_advertisement() {
+        // A caller that skipped the capability check — an older app, a hand-rolled request — must
+        // still be refused, or the gate is bypassable by simply not asking.
+        let base = temp_base("valve_402");
+        hub_config::write_config_in(&base, &valve_cfg(false)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
+        let r = post_valve(&origin, &key("owner"), r#"{"devId":"aaaabbbbccccdddd","action":"close"}"#).await;
+        assert_eq!(r.status(), 402);
+    }
+
+    #[tokio::test]
+    async fn a_monitor_may_not_actuate_a_valve() {
+        let base = temp_base("valve_role");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("monitor")]).await;
+        let r = post_valve(&origin, &key("monitor"), r#"{"devId":"aaaabbbbccccdddd","action":"close"}"#).await;
+        assert_eq!(r.status(), 403);
+    }
+
+    #[tokio::test]
+    async fn a_washdown_may_not_carry_a_volume_cap() {
+        // Owner spec 2026-07-30, re-ratified twice: washdown is TIME-ONLY. Honouring a cap sent
+        // alongside mode=washdown would re-create the "external cap" that cut 2-hour hose runs at
+        // ~26 gal, so the request is refused rather than either side being silently dropped.
+        let base = temp_base("valve_washdown");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
+        let r = post_valve(&origin, &key("owner"),
+            r#"{"devId":"aaaabbbbccccdddd","action":"open","durationSecs":7200,"volumeCapL":100,"mode":"washdown"}"#).await;
+        assert_eq!(r.status(), 422);
+        let body: serde_json::Value = r.json().await.unwrap();
+        assert!(body["error"].as_str().unwrap().contains("time-limited"));
+    }
+
+    #[tokio::test]
+    async fn a_valve_this_hub_was_not_told_about_is_refused() {
+        // A hub is not a general-purpose proxy onto the vessel's RF network — the same reasoning
+        // as the relay's path allowlist.
+        let base = temp_base("valve_unknown");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
+        let r = post_valve(&origin, &key("owner"), r#"{"devId":"ffffeeeeddddcccc","action":"close"}"#).await;
+        assert_eq!(r.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn an_open_without_a_duration_is_refused() {
+        // Every open carries a bound — that is the primary safeguard in the valve safety model.
+        let base = temp_base("valve_nodur");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
+        let r = post_valve(&origin, &key("owner"), r#"{"devId":"aaaabbbbccccdddd","action":"open"}"#).await;
+        assert_eq!(r.status(), 422);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_action_is_refused_rather_than_guessed() {
+        let base = temp_base("valve_action");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
+        let r = post_valve(&origin, &key("owner"), r#"{"devId":"aaaabbbbccccdddd","action":"purge"}"#).await;
+        assert_eq!(r.status(), 422);
+    }
+
 }
