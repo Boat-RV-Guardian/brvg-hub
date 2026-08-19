@@ -110,9 +110,36 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # Checkout FIRST: actions/checkout cleans its destination, so it would delete the downloaded
+      # artifacts if it ran after them. It is here for daemon/windows/installer.nsi, nothing else.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+
+      # Build the hub's own Windows installer HERE, in the release job, rather than on the Windows
+      # leg -- because this is where the released .exe already sits, so the installer is guaranteed
+      # to wrap the exact binary this release publishes, and its hash lands in the same SHA256SUMS.
+      #
+      # ⚠️ WHY THIS STEP EXISTS AT ALL: #21 added installer.nsi and #22 added a compile gate whose
+      # comment says it "only SHIPS from a daemon-v* tag" -- but no step was ever added here to
+      # ship it. daemon-v0.2.0 therefore carries no installer, and the app's increment-C bundling
+      # is blocked on an asset no release would ever have produced.
+      #
+      # ⚠️ The ci.yml gate proves the SCRIPT compiles; it feeds makensis a Linux ELF renamed .exe,
+      # so it cannot prove the installer works. This step is the first that wraps a real PE.
+      #
+      # makensis cross-builds on Linux (same toolchain the gate uses). Paths mirror the gate
+      # exactly -- NSIS resolves `File` and `OutFile` against the SCRIPT's directory, which is why
+      # the binary is staged into windows/ and the output appears there too.
+      - name: Build the Windows installer
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y nsis
+          cp brvg-hub-windows-x64.exe daemon/windows/brvg-hub.exe
+          (cd daemon && makensis -V2 windows/installer.nsi)
+          mv daemon/windows/brvg-hub-windows-setup.exe .
+          echo "installer: $(stat -c%s brvg-hub-windows-setup.exe) bytes"
+
       - name: Checksums
         run: |
           sha256sum brvg-hub-* > SHA256SUMS
