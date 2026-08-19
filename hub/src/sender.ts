@@ -9,7 +9,9 @@ import type { BatchReport } from './contract.js';
 import type { HubConfig } from './config.js';
 
 export interface PendingCommand { id: string; cmd: string }
-export interface SendResult { ok: boolean; commands: PendingCommand[] }
+/** Per-valve Normal Run profiles riding DOWN on the reply (worker: config-as-state). */
+export interface WireValveProfiles { profiles?: Record<string, { durationSecs?: number; volumeCapL?: number; autoRestart?: boolean }> }
+export interface SendResult { ok: boolean; commands: PendingCommand[]; linktap?: WireValveProfiles }
 export type Sender = (report: BatchReport, ackIds?: string[]) => Promise<SendResult>;
 
 export function makeSender(config: HubConfig, fetchImpl: typeof fetch = fetch): Sender {
@@ -30,6 +32,7 @@ export function makeSender(config: HubConfig, fetchImpl: typeof fetch = fetch): 
       // the worker has the data, and the aggregator should stop retrying it.
       if (!res.ok) return { ok: false, commands: [] };
       let commands: PendingCommand[] = [];
+      let linktap: WireValveProfiles | undefined;
       try {
         const body: any = await res.json();
         if (Array.isArray(body?.commands)) {
@@ -37,8 +40,13 @@ export function makeSender(config: HubConfig, fetchImpl: typeof fetch = fetch): 
             (c: any) => c && typeof c.id === 'string' && typeof c.cmd === 'string',
           );
         }
+        // Config-as-state: the worker recomputes this from the vehicle's device records on every
+        // delivery, so simply passing it through is what makes a restarted hub self-heal.
+        if (body?.linktap && typeof body.linktap === 'object' && body.linktap.profiles) {
+          linktap = { profiles: body.linktap.profiles };
+        }
       } catch { /* a bodyless 2xx is still a delivered report */ }
-      return { ok: true, commands };
+      return { ok: true, commands, ...(linktap ? { linktap } : {}) };
     } catch {
       return { ok: false, commands: [] }; // network/timeout — the aggregator retries under the same seq
     }

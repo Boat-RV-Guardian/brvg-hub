@@ -55,6 +55,7 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
     const acks = pendingAcks.slice();
     const r = await send(report, acks);
     if (!r.ok) return false;
+    if (linktap && r.linktap?.profiles) linktap.applyProfiles(r.linktap.profiles);
     pendingAcks = pendingAcks.filter((a) => !acks.includes(a)); // the worker saw these
     for (const c of r.commands) {
       if (pendingAcks.includes(c.id)) continue; // still un-acked from a prior reply — already ran

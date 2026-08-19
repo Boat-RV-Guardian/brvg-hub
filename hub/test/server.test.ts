@@ -151,3 +151,26 @@ describe('version consistency', () => {
     expect(pkg.version).toBe(HUB_VERSION);
   });
 });
+
+// The sender passes the worker's linktap config blob through untouched (config-as-state).
+import { makeSender } from '../src/sender.js';
+
+describe('sender: linktap profiles ride the reply', () => {
+  const cfg = { vid: 'v1', deviceId: 'hub_1', token: 't', workerBase: 'https://w.example' } as any;
+
+  it('surfaces body.linktap.profiles on a 2xx', async () => {
+    const fetchImpl = (async () => ({
+      ok: true,
+      json: async () => ({ status: 'ok', linktap: { profiles: { aaaabbbbccccdddd: { volumeCapL: 250 } } } }),
+    })) as any;
+    const r = await makeSender(cfg, fetchImpl)({ v: 1, kind: 'delta', items: [], ok: [] } as any);
+    expect(r.ok).toBe(true);
+    expect(r.linktap?.profiles?.aaaabbbbccccdddd?.volumeCapL).toBe(250);
+  });
+
+  it('a reply without the blob leaves it absent — no phantom empty profiles', async () => {
+    const fetchImpl = (async () => ({ ok: true, json: async () => ({ status: 'ok' }) })) as any;
+    const r = await makeSender(cfg, fetchImpl)({ v: 1, kind: 'delta', items: [], ok: [] } as any);
+    expect(r.linktap).toBeUndefined();
+  });
+});
