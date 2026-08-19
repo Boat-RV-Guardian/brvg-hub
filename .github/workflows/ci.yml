@@ -58,3 +58,17 @@ jobs:
             echo "build-feed.sh produced an UNSIGNED feed without ALLOW_UNSIGNED" >&2
             exit 1
           fi
+
+  # The Rust hub daemon (daemon/) — completely standalone by ruling (owner 2026-08-19): its own
+  # build, its own CI, its own releases. The desktop app never compiles it; it downloads a pinned,
+  # already-built release artifact.
+  daemon:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - run: cargo build --release

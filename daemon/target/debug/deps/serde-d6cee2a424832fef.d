@@ -1,0 +1,14 @@
+/Users/jgearinger/projects/.wt/hubd/daemon/target/debug/deps/serde-d6cee2a424832fef.d: /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/jgearinger/projects/.wt/hubd/daemon/target/debug/build/serde-47d4d1738f453ee4/out/private.rs
+
+/Users/jgearinger/projects/.wt/hubd/daemon/target/debug/deps/libserde-d6cee2a424832fef.rlib: /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/jgearinger/projects/.wt/hubd/daemon/target/debug/build/serde-47d4d1738f453ee4/out/private.rs
+
+/Users/jgearinger/projects/.wt/hubd/daemon/target/debug/deps/libserde-d6cee2a424832fef.rmeta: /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/jgearinger/projects/.wt/hubd/daemon/target/debug/build/serde-47d4d1738f453ee4/out/private.rs
+
+/Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/Users/jgearinger/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/Users/jgearinger/projects/.wt/hubd/daemon/target/debug/build/serde-47d4d1738f453ee4/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/jgearinger/projects/.wt/hubd/daemon/target/debug/build/serde-47d4d1738f453ee4/out

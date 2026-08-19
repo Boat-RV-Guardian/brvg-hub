@@ -1,0 +1,46 @@
+# The BRVG HUB DAEMON — the desktop hub as its own application (owner ruling 2026-08-19,
+# HUB-PROXY.md): "the hub needs to be its own installer and application for both OSX and windows.
+# you can install a hub only on both platforms without the UI." Public by the same ruling: "i want
+# the standalone hub code to be all public."
+#
+# No UI framework, no webview, no window: a tokio process that owns its configuration, serves the
+# LAN management API, heartbeats the cloud, and holds the relay socket to the worker. The desktop
+# app is one of its CLIENTS — it talks to a running hub over HTTP exactly like a phone across the
+# boat does — and consumes this crate as a pinned git dependency only so its transitional `--hub`
+# launch path keeps working until the standalone installers ship.
+#
+# Third sibling in this repo, one wire contract: agent/ is hub-lite (POSIX shell, for the router),
+# hub/ is the TypeScript hub (containers), and this is the Windows/macOS daemon. They share the
+# contract and its fixtures, not source — see the repo README.
+[package]
+name = "brvg-hub"
+version = "0.1.0"
+description = "Boat & RV Guardian hub — the always-on service that carries a vehicle's local work"
+edition = "2021"
+rust-version = "1.77.2"
+license = "Apache-2.0"
+
+# Its own workspace on purpose: this crate builds separately (its own lockfile, its own releases —
+# HUB-PROXY.md increment D), and the app consumes it only as a path dependency.
+[workspace]
+
+[lib]
+name = "brvg_hub"
+path = "src/lib.rs"
+
+[[bin]]
+name = "brvg-hub"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+axum = "0.8.4"
+url = "2"
+# rustls everywhere TLS is needed — no native TLS stack, matching the app's choice and for the
+# same reason: one vetted TLS story across every artifact we ship.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+uuid = { version = "1", features = ["v4"] }
