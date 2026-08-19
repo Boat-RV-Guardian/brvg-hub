@@ -592,3 +592,29 @@ check "effective: wire cap wins" "50" "$_capL"
 check "effective: unset duration falls to the conf default" "86400" "$_dur"
 check "effective: unset autoRestart falls to the conf default" "0" "$_ar"
 rm -rf "$_LT_T"
+
+# --- The daily ledger on hub-lite (parity port of cycle.ts applyToLedger) -------------------------
+_LD=$(mktemp -d)
+_LF="$_LD/ledger.aaaabbbbccccdddd"
+
+out=$(lt_ledger_apply normal 40 2026-08-19 "$_LF")
+check "ledger: first normal run starts the day" "40.00" "$out"
+out=$(lt_ledger_apply tankfill 60 2026-08-19 "$_LF")
+check "ledger: tank fill accumulates" "100.00" "$out"
+
+# Owner rule: washdown does NOT count against the daily value.
+out=$(lt_ledger_apply washdown 500 2026-08-19 "$_LF")
+check "ledger: washdown contributes NOTHING" "100.00" "$out"
+
+# ...but it still rolls the day, so tomorrow's first run cannot resume yesterday's total.
+out=$(lt_ledger_apply washdown 500 2026-08-20 "$_LF")
+check "ledger: a washdown on a new day rolls the date and stays zero" "0.00" "$out"
+out=$(lt_ledger_apply normal 25 2026-08-20 "$_LF")
+check "ledger: the new day accumulates from zero, not from yesterday" "25.00" "$out"
+
+# A brand-new valve (no file yet) starts clean.
+out=$(lt_ledger_apply normal 12.5 2026-08-20 "$_LD/ledger.newvalve")
+check "ledger: an unseen valve starts at its own first run" "12.50" "$out"
+
+check "ledger: day keys are UTC ISO dates" "$(date -u +%F)" "$(lt_day_key)"
+rm -rf "$_LD"

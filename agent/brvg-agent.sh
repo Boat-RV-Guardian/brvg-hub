@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.12.0"
+AGENT_VERSION="0.13.0"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -1146,6 +1146,38 @@ lt_apply_profiles() {
   done
 }
 
+# The DAILY LEDGER (parity port of cycle.ts applyToLedger — the last hub-lite gap, 2026-08-19).
+# Owner rule: washdown volume does NOT count against the daily value; everything else does,
+# including an adopted manual run — a hose run by hand is exactly the water the number exists to
+# see. Day keys are UTC ISO dates (storage is UTC, display converts — house rule).
+#
+# State per valve in $LT_STATE_DIR/ledger.<dev>: "DAY=YYYY-MM-DD" + "DAY_VOL=<litres>". tmpfs, so
+# a reboot loses it — acceptable and honest: the ledger is a running total the cloud also receives
+# on every measurement, so the cloud's copy is the durable one.
+
+# $1 mode, $2 volume litres, $3 day key, $4 ledger file. Prints the new running total.
+lt_ledger_apply() {
+  _lm="$1"; _lv="$2"; _lday="$3"; _lfile="$4"
+  DAY=""; DAY_VOL=0
+  # shellcheck disable=SC1090
+  [ -f "$_lfile" ] && . "$_lfile"
+  # A new UTC day starts from zero rather than carrying yesterday's total forward.
+  [ "$DAY" = "$_lday" ] || DAY_VOL=0
+  # Washdown contributes nothing (owner rule) — but it still ROLLS the day, so the file is never
+  # left holding a stale date that would make tomorrow's first Normal Run resume yesterday's total.
+  if [ "$_lm" = "washdown" ]; then
+    _add=0
+  else
+    _add="$_lv"
+  fi
+  DAY_VOL=$(awk -v a="$DAY_VOL" -v b="$_add" 'BEGIN{printf "%.2f", a + b}')
+  printf 'DAY=%s\nDAY_VOL=%s\n' "$_lday" "$DAY_VOL" > "$_lfile"
+  printf '%s' "$DAY_VOL"
+}
+
+# UTC day key. `date -u +%F` is POSIX and present on busybox.
+lt_day_key() { date -u +%F; }
+
 # One poll pass over every configured valve. State per valve in $LT_STATE_DIR/<dev>:
 #   state=idle|watering  started=<epoch>  stop= |volume_cap|manual|flood_shutoff
 LT_STATE_DIR="${LT_STATE_DIR:-/tmp/brvg-linktap}"
@@ -1208,7 +1240,12 @@ linktap_tick() {
       ended:*)
         _reason="${_act#ended:}"
         rm -f "$_sf"
-        printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "lt_${_d}" "linktap.cycle.change" "reason=${_reason}&vol_l=${_volL}" \
+        # The cycle's MODE decides whether it counts. This tier only ever runs Normal Runs today
+        # (washdown/tank fill stay app- and hub-driven), so an ended cycle here is normal — stated
+        # explicitly rather than assumed, so adding washdown later cannot silently miscount.
+        _dayvol=$(lt_ledger_apply normal "$_volL" "$(lt_day_key)" "$LT_STATE_DIR/ledger.$_d")
+        printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "lt_${_d}" "linktap.cycle.change" \
+          "reason=${_reason}&vol_l=${_volL}&day=$(lt_day_key)&day_vol_l=${_dayvol}" \
           >> "${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
         if lt_should_restart "$_reason" "$_ar"; then
           _capGw=$(awk -v c="$_capL" -v u="$_unit" 'BEGIN{printf "%.2f", (u=="gal") ? c/3.785411784 : c}')
@@ -1221,7 +1258,17 @@ linktap_tick() {
       none) : ;;
     esac
     # Telemetry rides the roll-up, same event name as the TS hub.
-    printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "lt_${_d}" "linktap.measurement" "watering=${_w}&vol_l=${_volL}" \
+    # Same event name and same params as the TS hub / daemon emit, so the cloud cannot tell the
+    # tiers apart — which is the point of the one-contract rule.
+    _ldg=""
+    if [ -f "$LT_STATE_DIR/ledger.$_d" ]; then
+      DAY=""; DAY_VOL=0
+      # shellcheck disable=SC1090
+      . "$LT_STATE_DIR/ledger.$_d"
+      _ldg="&day=${DAY}&day_vol_l=${DAY_VOL}"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "lt_${_d}" "linktap.measurement" \
+      "watering=${_w}&vol_l=${_volL}${_ldg}" \
       >> "${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
   done
 }
