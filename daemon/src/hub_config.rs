@@ -61,6 +61,27 @@ pub struct HubConfig {
     /// successful sync. Lives here because this file is already the hub's one credential store
     /// (SYSTEM/0600) — a second file would just be a second thing to lock down.
     pub member_keys: Vec<MemberKey>,
+    /// LinkTap gateway on the LAN, when this vehicle has one. Empty host ⇒ the capability is off
+    /// and the hub advertises no `linktap` capability at all.
+    #[serde(default)]
+    pub linktap: LinkTapConfig,
+}
+
+/// The hub's LinkTap configuration and the cloud's PERMISSION for it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LinkTapConfig {
+    pub host: String,
+    pub gw_id: String,
+    /// The valves this hub may drive (canonical 16-hex ids).
+    pub dev_ids: Vec<String>,
+    /// ⚠️ THE PAID GATE, decided by the CLOUD and cached here (worker cloud-server #104 sends it on
+    /// every batch reply as `linktap.allowed`). The valve is Weekender+ as of the owner's
+    /// 2026-08-15 ruling, enforced cloud-side — but this hub drives the valve on the LAN with no
+    /// cloud call in the path, so deciding capability locally would make the hub the way AROUND
+    /// that gate. DEFAULTS TO FALSE: a hub that has never heard from the cloud advertises nothing,
+    /// which is the same default-deny every other tier decision uses.
+    pub allowed: bool,
 }
 
 impl Default for HubConfig {
@@ -74,6 +95,7 @@ impl Default for HubConfig {
             token: String::new(),
             http_port: DEFAULT_HTTP_PORT,
             member_keys: Vec::new(),
+            linktap: LinkTapConfig::default(),
         }
     }
 }
@@ -239,6 +261,10 @@ mod tests {
             enabled: true, heartbeat_secs: 60, token: "tok".into(),
             http_port: 9000,
             member_keys: vec![MemberKey { key: "k1".into(), uid: "u1".into(), role: "coowner".into() }],
+            linktap: LinkTapConfig {
+                host: "192.168.8.20".into(), gw_id: "GW02".into(),
+                dev_ids: vec!["aaaabbbbccccdddd".into()], allowed: true,
+            },
         };
         let text = serde_json::to_string(&cfg).unwrap();
         assert_eq!(serde_json::from_str::<HubConfig>(&text).unwrap(), cfg);
@@ -246,6 +272,10 @@ mod tests {
         // fields it does not know get REAL defaults: a #388-era hub.json must come up on the
         // default management port, not port 0.
         let partial: HubConfig = serde_json::from_str(r#"{"hub_id":"hub_2"}"#).unwrap();
+        // The paid gate DEFAULTS TO DENY: a hub.json that predates the field, or a hub that has
+        // never heard from the cloud, must not claim valve capability.
+        assert!(!partial.linktap.allowed);
+        assert!(partial.linktap.host.is_empty());
         assert_eq!(partial.hub_id, "hub_2");
         assert_eq!(partial.heartbeat_secs, 0);
         assert!(partial.token.is_empty());
