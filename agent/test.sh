@@ -457,6 +457,62 @@ apply_anchor 0
 check "anchor: stand-down disarms" "0" "$(anchor_sig)"
 rm -rf "$_scratch"
 
+# --- LinkTap flood shutoff (hub-lite capability #1) ----------------------------------------------
+# Classification fixtures MIRROR brvg-cloud-server's events.ts isFloodShutoff tests — the one-
+# contract rule: same capability, two implementations, one fixture set. If a case is added there,
+# add it here.
+flood_case() { # $1 label, $2 event, $3 expected yes|no
+  if is_flood_shutoff "$2"; then _got=yes; else _got=no; fi
+  check "flood classify: $1" "$3" "$_got"
+}
+flood_case "flood.alarm closes" "flood.alarm" yes
+flood_case "leak.detected closes" "leak.detected" yes
+flood_case "bare alarm closes" "alarm" yes
+flood_case "case-insensitive like the worker regex" "Flood.Alarm" yes
+flood_case "a clear (_off) must NOT close" "flood.alarm_off" no
+flood_case "a clear (.off) must NOT close" "alarm.off" no
+flood_case "telemetry .measurement never closes" "flood.measurement" no
+flood_case "telemetry .change never closes" "flood.change" no
+flood_case "unrelated events never close" "voltmeter.measurement" no
+flood_case "button press never closes" "button.push" no
+
+# cmd 7 body — same dialect as the TS hub's buildStop, pinned byte-for-byte.
+out=$(linktap_stop_body "CCCCDDDDEEEEFFFF" "aaaabbbbccccdddd")
+check "linktap_stop_body cmd 7 shape" '{"cmd":7,"gw_id":"CCCCDDDDEEEEFFFF","dev_id":"aaaabbbbccccdddd"}' "$out"
+
+# linktap_flood_close: stub curl, capture what would hit the gateway, check the spool line.
+_CURL_LOG=$(mktemp); _SPOOL_T=$(mktemp)
+curl() { # capture -d body and the url (last arg)
+  _body=""; _prev=""
+  for _a in "$@"; do [ "$_prev" = "-d" ] && _body="$_a"; _prev="$_a"; done
+  eval "_url=\${$#}"
+  printf '%s %s\n' "$_url" "$_body" >> "$_CURL_LOG"
+  return 0
+}
+LINKTAP_HOST="192.168.8.20" LINKTAP_GW_ID="GW02" LINKTAP_DEV_IDS="aaaabbbbccccdddd, bbbbccccddddeeeeEXTRA" \
+BRVG_RELAY_SPOOL="$_SPOOL_T" linktap_flood_close
+check "flood close posts one cmd 7 per valve" "2" "$(wc -l < "$_CURL_LOG" | tr -d ' ')"
+check "flood close targets api.shtml" "http://192.168.8.20/api.shtml" "$(head -1 "$_CURL_LOG" | cut -d' ' -f1)"
+check "flood close normalises the 16-hex id like the TS client" \
+  '{"cmd":7,"gw_id":"GW02","dev_id":"bbbbccccddddeeee"}' "$(sed -n 2p "$_CURL_LOG" | cut -d' ' -f2-)"
+check "each close spools a flood_close.change line" "2" "$(grep -c 'linktap.flood_close.change' "$_SPOOL_T" | tr -d ' ')"
+check "the spool line carries the outcome" "ok=1" "$(head -1 "$_SPOOL_T" | cut -f4)"
+
+# a failing gateway spools ok=0 and does not abort the loop
+curl() { return 22; }
+: > "$_CURL_LOG"; : > "$_SPOOL_T"
+LINKTAP_HOST="192.168.8.20" LINKTAP_GW_ID="GW02" LINKTAP_DEV_IDS="aaaabbbbccccdddd" \
+BRVG_RELAY_SPOOL="$_SPOOL_T" linktap_flood_close
+check "a failed close is spooled as ok=0" "ok=0" "$(head -1 "$_SPOOL_T" | cut -f4)"
+unset -f curl
+rm -f "$_CURL_LOG" "$_SPOOL_T"
+
+# unconfigured = strict no-op (every existing install)
+_SPOOL_T=$(mktemp)
+LINKTAP_HOST="" LINKTAP_GW_ID="" LINKTAP_DEV_IDS="" BRVG_RELAY_SPOOL="$_SPOOL_T" linktap_flood_close
+check "no LinkTap config -> no-op, nothing spooled" "0" "$(wc -c < "$_SPOOL_T" | tr -d ' ')"
+rm -f "$_SPOOL_T"
+
 if [ "$fails" -gt 0 ]; then
   echo "$fails test(s) FAILED"
   exit 1

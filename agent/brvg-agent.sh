@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.9.1"
+AGENT_VERSION="0.10.0"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -981,6 +981,57 @@ push_modem() {
   # what is deployed.
   _p="$_p&av=$AGENT_VERSION$(collect_wan_usage)"
   send_event "modem.measurement" "$_p"
+}
+
+# --- LinkTap: local flood -> valve shutoff (hub-lite capability #1; owner 2026-08-19) -----------
+# The hub-only LinkTap model (HUB-PROXY.md 2026-08-19): the gateway lives on the LAN and this
+# router is its controller. When a flood alarm arrives at the relay's receiver, close every
+# configured valve over the gateway's local HTTP API BEFORE the cloud send — the close must not
+# wait on the WAN, and with the LinkTap cloud gone this is the only automated close path when the
+# uplink is down. The valve self-limits regardless (every open carries duration+volume), so this
+# only ever closes it sooner. Same capability as the TypeScript hub's floodStopAll — a second
+# implementation by design; the shared fixtures in test.sh keep the two from diverging.
+
+# The worker's events.ts flood-shutoff line, ported verbatim: /flood|leak|alarm/i, minus clears
+# (_off / .off), minus telemetry (.measurement / .change). Keep the three in the same order so a
+# diff against events.ts stays readable.
+is_flood_shutoff() {
+  _ev=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  case "$_ev" in
+    *.measurement|*.change) return 1 ;;
+    *_off|*.off) return 1 ;;
+  esac
+  case "$_ev" in
+    *flood*|*leak*|*alarm*) return 0 ;;
+  esac
+  return 1
+}
+
+# The cmd 7 body, same dialect as the TS hub's buildStop — {"cmd":7,"gw_id":...,"dev_id":...}.
+linktap_stop_body() {
+  printf '{"cmd":7,"gw_id":"%s","dev_id":"%s"}' "$1" "$2"
+}
+
+# Close every valve in $LINKTAP_DEV_IDS via http://$LINKTAP_HOST/api.shtml. No-op when LinkTap is
+# not configured, so every existing install is untouched. Each attempt spools a
+# linktap.flood_close.change line (rides the roll-up — visibility with zero new wire surface) and
+# logs locally; a failed close is spooled with ok=0 rather than retried here — the alarm itself is
+# already on its way to the cloud, and the worker's own flood path remains the escalation.
+linktap_flood_close() {
+  [ -n "${LINKTAP_HOST:-}" ] && [ -n "${LINKTAP_GW_ID:-}" ] && [ -n "${LINKTAP_DEV_IDS:-}" ] || return 0
+  for _d in $(printf '%s' "$LINKTAP_DEV_IDS" | tr ',' ' '); do
+    # Canonical 16-hex id, same normalisation as the TS client's normalizeDevId.
+    _d=$(printf '%s' "$_d" | tr -cd 'A-Za-z0-9' | cut -c1-16)
+    [ -n "$_d" ] || continue
+    if curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json'         -d "$(linktap_stop_body "$LINKTAP_GW_ID" "$_d")"         "http://${LINKTAP_HOST}/api.shtml" >/dev/null 2>&1; then
+      _ok=1
+    else
+      _ok=0
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "lt_${_d}" "linktap.flood_close.change" "ok=${_ok}" \
+      >> "${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
+    logger -t brvg-agent "flood shutoff: valve ${_d} close ok=${_ok}" 2>/dev/null || true
+  done
 }
 
 # --- Main loop ---------------------------------------------------------------------------------
