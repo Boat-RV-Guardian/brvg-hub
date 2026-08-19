@@ -33,6 +33,21 @@ if (!host || !gw) {
   process.exit(2);
 }
 
+/**
+ * The gateway's full return-code table, recovered from the Hubitat MQTT driver — the only published
+ * decoding of this field. Printing the meaning beats printing a bare number at 2am on a boat.
+ */
+const RET = {
+  0: 'Success',
+  1: 'Message format error',
+  2: 'CMD message not supported',
+  3: 'Gateway ID not matched',
+  4: 'End device ID error',
+  5: 'End device ID not found',
+  6: 'Gateway internal error',
+  7: 'Conflict with watering plan',
+};
+
 /** Unwrap the HTML the gateway wraps replies in unless that is disabled in its admin page. */
 function unwrap(text) {
   if (text.includes('<html') || text.includes('<body')) {
@@ -61,7 +76,9 @@ async function send(label, body) {
       const json = JSON.parse(text);
       console.log(`   ← parsed: ${JSON.stringify(json)}`);
       if (typeof json.ret === 'number') {
-        console.log(`   ← ret=${json.ret} ${json.ret === 0 ? '(success on every command seen so far)' : '⚠️ NON-ZERO — record what this code means'}`);
+        console.log(`   ← ret=${json.ret} — ${RET[json.ret] ?? 'UNKNOWN CODE, record it'}`);
+        if (json.ret === 5) console.log('     ⇒ the gateway could not reach that valve: powered? in RF range? in pairing mode?');
+        if (json.ret === 7) console.log('     ⇒ a watering PLAN is in the way — clear it with cmd 5 and retry');
       }
       return json;
     } catch {
@@ -98,8 +115,10 @@ if (flag('add') || flag('remove')) {
   if (!dev) { console.error('\n--add/--remove need --dev <dev-id>'); process.exit(2); }
   const adding = flag('add');
   console.log(`\n⚠️  MUTATING the gateway's device registry (${adding ? 'CMD 1 add' : 'CMD 2 remove'}).`);
-  console.log('    This has never been done over HTTP by anyone. If it is an add, be ready to hold');
-  console.log('    the valve\'s pairing button — the RF join may need it, and we do not yet know.');
+  console.log('    The MESSAGE is proven (a shipping Hubitat driver implements this exact command');
+  console.log('    over MQTT, and the vendor defines HTTP as carrying the same messages). What is');
+  console.log('    unproven is this TRANSPORT on this firmware. Expect ret=0 on success; ret=5 means');
+  console.log('    the gateway could not reach the valve, so have it powered and in pairing mode.');
   // ⚠️ end_dev is an ARRAY here, unlike the singular dev_id every other command takes.
   const reply = await send(
     adding ? 'cmd 1   ADD end device' : 'cmd 2   REMOVE end device',

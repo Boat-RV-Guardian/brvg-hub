@@ -4,6 +4,7 @@ import {
   extractJsonFromMaybeHtml, coerceWateringBool, reportsVolume, cycleVolumeLitres,
   buildStatus, buildStart, buildStop, buildGetConfiguration, buildDeleteWaterPlan,
   buildAddValve, buildRemoveValve, postCommand, readVolUnit,
+  describeRet, normalizeDevId, LT_RET,
 } from '../src/linktap.js';
 
 const GW = { host: '192.168.1.107', gatewayId: 'CCCCDDDDEEEEFFFF' };
@@ -144,11 +145,23 @@ describe('postCommand', () => {
     expect((await postCommand(GW, buildStart(GW, DEV, 60), fetchImpl)).ok).toBe(true);
   });
 
-  it('treats a non-zero ret as failure and surfaces the code', async () => {
+  it('treats a non-zero ret as failure and DECODES it rather than printing a bare number', async () => {
     const fetchImpl = vi.fn(async () => okRes('{"cmd":1,"ret":3}')) as any;
     const r = await postCommand(GW, buildAddValve(GW, [DEV]), fetchImpl);
     expect(r.ok).toBe(false);
     expect(r.ret).toBe(3);
+    expect(r.error).toBe('Gateway ID not matched');
+  });
+
+  it('decodes the two ret codes that actually bite during pairing', async () => {
+    // 5 = the RF join failed (valve unpowered, out of range, not in pairing mode).
+    const notFound = vi.fn(async () => okRes('{"cmd":1,"ret":5}')) as any;
+    expect((await postCommand(GW, buildAddValve(GW, [DEV]), notFound)).error)
+      .toBe('End device ID not found');
+    // 7 = a watering plan is in the way, which is why adopting a gateway clears its plans.
+    const conflict = vi.fn(async () => okRes('{"cmd":1,"ret":7}')) as any;
+    expect((await postCommand(GW, buildAddValve(GW, [DEV]), conflict)).error)
+      .toBe('Conflict with watering plan');
   });
 
   it('treats an ABSENT ret as success — status replies carry a payload instead', async () => {
@@ -188,5 +201,32 @@ describe('readVolUnit', () => {
     // Guessing litres would under-report by 3.79x, and the software cutoff compares against it.
     const boom = vi.fn(async () => { throw new Error('offline'); }) as any;
     expect(await readVolUnit(GW, boom)).toBe('gal');
+  });
+});
+
+describe('return codes', () => {
+  it('covers the gateway\'s full published set', () => {
+    expect(Object.keys(LT_RET)).toHaveLength(8);
+    expect(describeRet(0)).toBe('Success');
+    expect(describeRet(6)).toBe('Gateway internal error');
+  });
+
+  it('does not swallow a code it has never seen', () => {
+    expect(describeRet(42)).toContain('42');
+  });
+});
+
+describe('device id normalisation', () => {
+  it('keeps the canonical leading 16 hex characters', () => {
+    // The Hubitat driver records substring(0,16) of what it registered, so a printed label may
+    // carry a suffix while the gateway's own status reports the 16-char form.
+    expect(normalizeDevId('aaaabbbbccccdddd')).toBe('aaaabbbbccccdddd');
+    expect(normalizeDevId('aaaabbbbccccddddEXTRA')).toBe('aaaabbbbccccdddd');
+    expect(normalizeDevId('  aaaabbbbccccdddd  ')).toBe('aaaabbbbccccdddd');
+  });
+
+  it('normalises inside the pairing builders, so a pasted label still matches', () => {
+    expect(buildAddValve(GW, ['aaaabbbbccccddddEXTRA']).end_dev).toEqual(['aaaabbbbccccdddd']);
+    expect(buildRemoveValve(GW, [' aaaabbbbccccdddd ']).end_dev).toEqual(['aaaabbbbccccdddd']);
   });
 });

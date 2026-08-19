@@ -66,6 +66,43 @@ export const LITRES_PER_GALLON = 3.785411784;
  */
 export const MAX_PLAUSIBLE_CYCLE_VOLUME = 100_000;
 
+/**
+ * The gateway's return codes, complete. Recovered from the Hubitat MQTT driver's `retCodes` map —
+ * the only published decoding of this field, and the reason a failed command can now say what went
+ * wrong instead of printing a bare number at the user.
+ *
+ * Two of these are the ones that will actually bite during pairing:
+ *   * 5 `End device ID not found` — the gateway could not reach that valve. Powered? In RF range?
+ *     Pairing mode? This is the code that tells you the RF join failed rather than the request.
+ *   * 7 `Conflict with watering plan` — the gateway is refusing because a PLAN is in the way. This
+ *     is exactly why adopting a gateway clears its plans (see buildDeleteWaterPlan).
+ */
+export const LT_RET: Record<number, string> = {
+  0: 'Success',
+  1: 'Message format error',
+  2: 'CMD message not supported',
+  3: 'Gateway ID not matched',
+  4: 'End device ID error',
+  5: 'End device ID not found',
+  6: 'Gateway internal error',
+  7: 'Conflict with watering plan',
+};
+
+/** Human-readable form of a gateway `ret`, falling back to the raw code for anything unlisted. */
+export function describeRet(ret: number): string {
+  return LT_RET[ret] ?? `unknown gateway error ${ret}`;
+}
+
+/**
+ * LinkTap device ids are 16 hex characters. The Hubitat driver truncates with `substring(0,16)`
+ * before recording what it registered, which says the field tolerates a longer string (a printed
+ * code may carry a suffix) while the canonical id is the leading 16. Normalise on the way in so a
+ * valve added from a printed label matches the id the gateway then reports back in its status.
+ */
+export function normalizeDevId(id: string): string {
+  return id.trim().slice(0, 16);
+}
+
 export interface GatewayTarget {
   host: string;
   gatewayId: string;
@@ -189,12 +226,12 @@ export function buildDeleteWaterPlan(t: GatewayTarget, devId: string) {
  *    read-only production kit.
  */
 export function buildAddValve(t: GatewayTarget, devIds: string[]) {
-  return { cmd: LT_CMD.ADD_END_DEVICE, gw_id: t.gatewayId, end_dev: devIds };
+  return { cmd: LT_CMD.ADD_END_DEVICE, gw_id: t.gatewayId, end_dev: devIds.map(normalizeDevId) };
 }
 
 /** Remove valves from the gateway. Same `end_dev` array shape as buildAddValve. */
 export function buildRemoveValve(t: GatewayTarget, devIds: string[]) {
-  return { cmd: LT_CMD.REMOVE_END_DEVICE, gw_id: t.gatewayId, end_dev: devIds };
+  return { cmd: LT_CMD.REMOVE_END_DEVICE, gw_id: t.gatewayId, end_dev: devIds.map(normalizeDevId) };
 }
 
 // ── transport ──────────────────────────────────────────────────────────────────────────────────
@@ -235,7 +272,7 @@ export async function postCommand(
     const ret = typeof parsed?.ret === 'number' ? parsed.ret : undefined;
     // `ret` is absent on the status replies (cmd 3), which carry the payload instead — so absence
     // is not failure. Only an explicitly non-zero ret is.
-    if (ret != null && ret !== 0) return { ok: false, ret, data: parsed, error: `gateway ret=${ret}` };
+    if (ret != null && ret !== 0) return { ok: false, ret, data: parsed, error: describeRet(ret) };
     return { ok: true, ret, data: parsed };
   } catch (e: any) {
     return { ok: false, error: e?.name === 'TimeoutError' ? 'gateway timed out' : String(e?.message || e) };
