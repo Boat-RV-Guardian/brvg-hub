@@ -73,6 +73,33 @@ jobs:
             target/x86_64-apple-darwin/release/brvg-hub
           lipo -archs "${{ matrix.artifact }}"
 
+      - name: Build the macOS installer pkg
+        if: runner.os == 'macOS'
+        # The pkg is the "separate installer" of the owner's 2026-08-19 ruling: payload under
+        # /Library/Application Support/BoatRVGuardian/bin (the same shared root the daemon's own
+        # config uses — root-owned, exactly what the app could never write and the service should),
+        # plus a LaunchDaemon so it starts at boot before any login. UNSIGNED, like everything else
+        # this project ships so far — macOS will warn on first open; right-click → Open works.
+        run: |
+          VER="${GITHUB_REF_NAME#daemon-v}"
+          ROOT=pkgroot
+          mkdir -p "$ROOT/Library/Application Support/BoatRVGuardian/bin" "$ROOT/Library/LaunchDaemons" scripts
+          cp "${{ matrix.artifact }}" "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub"
+          chmod 755 "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub"
+          cp macos/com.sc4tech.brvg-hub.plist "$ROOT/Library/LaunchDaemons/"
+          cp macos/postinstall scripts/
+          pkgbuild --root "$ROOT" --scripts scripts \
+            --identifier com.sc4tech.brvg-hub --version "$VER" \
+            --install-location / brvg-hub-macos.pkg
+          pkgutil --check-signature brvg-hub-macos.pkg || true
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: brvg-hub-macos.pkg
+          path: daemon/brvg-hub-macos.pkg
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
