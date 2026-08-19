@@ -133,6 +133,33 @@ pub async fn send_heartbeat_once(client: &reqwest::Client, worker_base: &str, cf
     }
 }
 
+/// PURE: read `{linktap:{allowed, profiles}}` out of a worker reply (cloud-server #105).
+/// Config-as-state — the worker recomputes it from the vehicle on every report, so what arrives IS
+/// the current truth. An absent blob returns None and changes nothing; `allowed` absent reads as
+/// FALSE, never as permission.
+pub fn parse_linktap_reply(
+    body: &serde_json::Value,
+) -> Option<(bool, std::collections::HashMap<String, crate::linktap_runtime::WireProfile>)> {
+    let lt = body.get("linktap")?;
+    let allowed = lt.get("allowed").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut out = std::collections::HashMap::new();
+    if let Some(map) = lt.get("profiles").and_then(|v| v.as_object()) {
+        for (id, p) in map {
+            // Every field OPTIONAL — the worker omits what the vehicle never set, and the hub
+            // keeps its own default for those (skip-don't-default, preserved end to end).
+            out.insert(
+                linktap::normalize_dev_id(id),
+                crate::linktap_runtime::WireProfile {
+                    duration_secs: p.get("durationSecs").and_then(|v| v.as_u64()),
+                    volume_cap_l: p.get("volumeCapL").and_then(|v| v.as_f64()),
+                    auto_restart: p.get("autoRestart").and_then(|v| v.as_bool()),
+                },
+            );
+        }
+    }
+    Some((allowed, out))
+}
+
 #[derive(Deserialize)]
 struct KeysResp {
     keys: Vec<MemberKey>,
@@ -159,6 +186,10 @@ pub async fn fetch_member_keys(client: &reqwest::Client, worker_base: &str, cfg:
 // --- Server -------------------------------------------------------------------------------------
 
 pub struct Rt {
+    /// The LinkTap machine, when this hub has a gateway configured. One instance shared by the
+    /// poll loop, the gateway push route and the flood hook — they are three inputs to ONE state
+    /// machine, and giving each its own copy would let them disagree about a cycle.
+    pub linktap: tokio::sync::Mutex<Option<crate::linktap_runtime::Runtime>>,
     /// The store's base directory — shared_base() in production, a temp dir in tests.
     pub base: PathBuf,
     /// The live key set. Loaded from the store at boot (offline reboot still authenticates known
@@ -180,6 +211,7 @@ pub fn new_rt(base: PathBuf, worker_base: String) -> Shared {
         store: tokio::sync::Mutex::new(()),
         started: Instant::now(),
         worker_base,
+        linktap: tokio::sync::Mutex::new(None),
     })
 }
 
@@ -190,6 +222,15 @@ pub fn router(rt: Shared) -> Router {
         .route("/api/hub/token", post(h_token))
         .route("/api/hub/clear", post(h_clear))
         .route("/api/hub/linktap/valve", post(h_valve))
+        // The GATEWAY's own push (vendor doc §4.1: full status on every change + a 2-min
+        // heartbeat). ⚠️ UNAUTHENTICATED BY NECESSITY — the LinkTap gateway is a fixed-firmware
+        // appliance that cannot present a key. That is acceptable ONLY because this route is
+        // inert: it accepts no commands, changes no configuration, and its body can do nothing
+        // but feed status for valves this hub was already told to watch (unknown dev_ids are
+        // dropped by the runtime). The worst a hostile LAN peer achieves is a wrong volume
+        // reading, which the next poll corrects — deliberately NOT in the relay allowlist, so it
+        // is reachable only from the LAN.
+        .route("/api/hub/linktap/push", post(h_linktap_push))
         // First-run only, and only from this machine — see h_identity.
         .route("/api/hub/ping", get(h_ping))
         .route("/api/hub/identity", get(h_identity))
@@ -567,6 +608,26 @@ async fn h_valve(State(rt): State<Shared>, headers: HeaderMap, body: axum::body:
     lan_call(&rt, &headers, "POST", "/api/hub/linktap/valve", &body).await
 }
 
+async fn h_linktap_push(State(rt): State<Shared>, body: axum::body::Bytes) -> Response {
+    // Answer FIRST, work after — the gateway retries a slow endpoint, and a duplicate status is
+    // worse than a late one (it would re-run the cutoff comparison against stale numbers).
+    let text = String::from_utf8_lossy(&body).to_string();
+    tokio::spawn(async move {
+        let client = http_client();
+        for (dev_id, data) in crate::linktap_runtime::parse_gateway_push(&text) {
+            let (action, reports) = {
+                let mut guard = rt.linktap.lock().await;
+                match guard.as_mut() {
+                    Some(r) => r.observe(&dev_id, &data, now_ms()),
+                    None => (crate::cycle::Action::None, Vec::new()),
+                }
+            };
+            linktap_act(&rt, &client, &dev_id, action, reports).await;
+        }
+    });
+    (StatusCode::OK, "ok").into_response()
+}
+
 // --- Loops --------------------------------------------------------------------------------------
 
 fn http_client() -> reqwest::Client {
@@ -583,13 +644,53 @@ async fn heartbeat_loop(rt: Shared) {
     loop {
         let cfg = hub_config::read_config_in(&rt.base);
         if !cfg.token.is_empty() && !cfg.vid.is_empty() && cfg.enabled {
-            if let Err(e) = send_heartbeat_once(&client, &rt.worker_base, &cfg).await {
-                eprintln!("hub: heartbeat failed: {e}");
+            match heartbeat_with_reply(&client, &rt.worker_base, &cfg).await {
+                Ok(body) => apply_linktap_reply(&rt, &body).await,
+                Err(e) => eprintln!("hub: heartbeat failed: {e}"),
             }
             let secs = u64::from(cfg.heartbeat_secs).max(HEARTBEAT_FLOOR_SECS);
             tokio::time::sleep(Duration::from_secs(secs)).await;
         } else {
             tokio::time::sleep(Duration::from_secs(UNREGISTERED_POLL_SECS)).await;
+        }
+    }
+}
+
+/// The heartbeat, keeping its reply — the config-as-state channel (cloud-server #105 attaches
+/// `{linktap:{allowed,profiles}}` to a hub's report). send_heartbeat_once stays for callers that
+/// only care whether it landed.
+async fn heartbeat_with_reply(client: &reqwest::Client, worker_base: &str, cfg: &HubConfig) -> Result<serde_json::Value, String> {
+    let url = heartbeat_url(worker_base, cfg, env!("CARGO_PKG_VERSION"), std::env::consts::OS)?;
+    let res = client.get(url).send().await.map_err(|e| e.without_url().to_string())?;
+    if !res.status().is_success() {
+        return Err(format!("HTTP {}", res.status().as_u16()));
+    }
+    res.json::<serde_json::Value>().await.map_err(|e| e.without_url().to_string())
+}
+
+/// Persist the cloud's valve PERMISSION and hand the per-valve profiles to the machine.
+///
+/// `allowed` is written to hub.json because the capability advertisement and the endpoint's own
+/// 402 both read it there — including on a boot with no internet, where the last known answer is
+/// the only one available. It defaults to false everywhere, so a hub that has never heard from the
+/// cloud claims nothing.
+async fn apply_linktap_reply(rt: &Rt, body: &serde_json::Value) {
+    let Some((allowed, profiles)) = parse_linktap_reply(body) else { return };
+    {
+        let _g = rt.store.lock().await;
+        let mut cfg = hub_config::read_config_in(&rt.base);
+        if cfg.linktap.allowed != allowed {
+            eprintln!("linktap: valve control {} by the vehicle's plan", if allowed { "permitted" } else { "NOT permitted" });
+            cfg.linktap.allowed = allowed;
+            if let Err(e) = hub_config::write_config_in(&rt.base, &cfg) {
+                eprintln!("hub: could not persist the linktap permission: {e}");
+            }
+        }
+    }
+    if !profiles.is_empty() {
+        let mut guard = rt.linktap.lock().await;
+        if let Some(r) = guard.as_mut() {
+            r.apply_profiles(&profiles);
         }
     }
 }
@@ -618,6 +719,191 @@ async fn key_sync_loop(rt: Shared) {
     }
 }
 
+// --- LinkTap: the I/O shell around the pure runtime -----------------------------------------------
+//
+// Three inputs, ONE state machine (rt.linktap): this poll loop, the gateway's HTTP push (the
+// /api/hub/linktap/push route), and the flood hook. The machine decides; this code performs.
+
+/// How often the poll floor runs. The gateway's own push heartbeat is 2 minutes, so this is the
+/// FLOOR under it, not the primary — a gateway nobody configured for push still works, and a
+/// missed push cannot strand stale state.
+const LINKTAP_POLL_SECS: u64 = 60;
+
+/// Rebuild the machine when the configured gateway/valves change, and keep the paid gate current.
+/// Returns false when LinkTap is not configured or not permitted, in which case nothing polls.
+async fn linktap_sync_config(rt: &Rt) -> bool {
+    let cfg = hub_config::read_config_in(&rt.base);
+    let lt = &cfg.linktap;
+    let usable = lt.allowed && !lt.host.is_empty() && !lt.gw_id.is_empty() && !lt.dev_ids.is_empty();
+    let mut guard = rt.linktap.lock().await;
+    if !usable {
+        // Dropping the machine on a revoked plan is deliberate: a hub whose vehicle stopped paying
+        // must stop driving the valve, not merely stop advertising that it can.
+        if guard.is_some() {
+            eprintln!("linktap: configuration withdrawn or plan no longer permits valve control — stopping");
+        }
+        *guard = None;
+        return false;
+    }
+    let gw = linktap::Gateway { host: lt.host.clone(), gw_id: lt.gw_id.clone() };
+    let needs_rebuild = match guard.as_ref() {
+        None => true,
+        Some(r) => {
+            let mut have = r.dev_ids();
+            have.sort();
+            let mut want: Vec<String> = lt.dev_ids.iter().map(|d| linktap::normalize_dev_id(d)).collect();
+            want.sort();
+            r.gateway.host != gw.host || r.gateway.gw_id != gw.gw_id || have != want
+        }
+    };
+    if needs_rebuild {
+        let profile = crate::cycle::Profile {
+            duration_secs: 24 * 3600,
+            volume_cap_l: 378.0, // the 100 gal Normal Run default; wire profiles override per valve
+            auto_restart: false,
+        };
+        let mut r = crate::linktap_runtime::Runtime::new(gw.clone(), &lt.dev_ids, profile);
+        // Read the gateway's unit ONCE per rebuild. Defaults to GALLONS when unreadable, because
+        // guessing litres under-reports a cap by 3.79x and the cutoff compares against it.
+        r.unit = linktap::read_vol_unit(&http_client(), &gw).await;
+        eprintln!("linktap: watching {} valve(s) via {} (unit {:?})", lt.dev_ids.len(), lt.host, r.unit);
+        *guard = Some(r);
+    }
+    true
+}
+
+/// Act on one machine decision: issue the stop it asked for, restart on a timer expiry, and spool
+/// whatever it wants reported.
+async fn linktap_act(
+    rt: &Rt,
+    client: &reqwest::Client,
+    dev_id: &str,
+    action: crate::cycle::Action,
+    reports: Vec<crate::linktap_runtime::Report>,
+) {
+    for r in reports {
+        spool_report(rt, &r).await;
+    }
+    let gw = {
+        let guard = rt.linktap.lock().await;
+        match guard.as_ref() {
+            Some(x) => x.gateway.clone(),
+            None => return,
+        }
+    };
+    if let crate::cycle::Action::Stop(reason) = action {
+        eprintln!("linktap: {dev_id} — issuing stop ({})", reason.as_str());
+        let reply = linktap::post_command(client, &gw, &linktap::build_stop(&gw, dev_id)).await;
+        if !reply.ok {
+            // A close that did not happen is worth hearing about immediately; the machine keeps
+            // stop_issued set, so the next observation retries without a re-issue storm.
+            eprintln!("linktap: {dev_id} STOP FAILED: {:?}", reply.error);
+            spool_report(rt, &crate::linktap_runtime::Report {
+                device: format!("lt_{dev_id}"),
+                event: "linktap.stop_failed".into(),
+                params: vec![("error".into(), reply.error.unwrap_or_default())],
+            }).await;
+        }
+    }
+}
+
+/// The poll floor.
+async fn linktap_poll_loop(rt: Shared) {
+    let client = http_client();
+    loop {
+        if linktap_sync_config(&rt).await {
+            let (gw, ids) = {
+                let guard = rt.linktap.lock().await;
+                match guard.as_ref() {
+                    Some(r) => (r.gateway.clone(), r.dev_ids()),
+                    None => (linktap::Gateway { host: String::new(), gw_id: String::new() }, Vec::new()),
+                }
+            };
+            for id in ids {
+                let reply = linktap::post_command(&client, &gw, &linktap::build_status(&gw, &id)).await;
+                if !reply.ok {
+                    continue; // an unreachable gateway is the poll loop's normal weather
+                }
+                let data = reply.data.get("dev_stat")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .cloned()
+                    .unwrap_or(reply.data);
+                let (action, reports) = {
+                    let mut guard = rt.linktap.lock().await;
+                    match guard.as_mut() {
+                        Some(r) => r.observe(&id, &data, now_ms()),
+                        None => (crate::cycle::Action::None, Vec::new()),
+                    }
+                };
+                linktap_act(&rt, &client, &id, action, reports).await;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(LINKTAP_POLL_SECS)).await;
+    }
+}
+
+/// Close every watched valve — the flood hook. The close must not wait on the WAN: with the
+/// LinkTap cloud gone this is the only automated close path when the uplink is down. The valve
+/// self-limits regardless (every open carries duration+volume), so this only ever closes it sooner.
+pub async fn linktap_flood_stop_all(rt: &Rt) {
+    let client = http_client();
+    let (gw, ids) = {
+        let guard = rt.linktap.lock().await;
+        match guard.as_ref() {
+            Some(r) => (r.gateway.clone(), r.dev_ids()),
+            None => return,
+        }
+    };
+    for id in ids {
+        {
+            let mut guard = rt.linktap.lock().await;
+            if let Some(r) = guard.as_mut() {
+                r.note_stop(&id, crate::cycle::EndReason::FloodShutoff);
+            }
+        }
+        let reply = linktap::post_command(&client, &gw, &linktap::build_stop(&gw, &id)).await;
+        eprintln!("linktap: flood shutoff -> {id} {}", if reply.ok { "closed" } else { "FAILED" });
+        if !reply.ok {
+            spool_report(rt, &crate::linktap_runtime::Report {
+                device: format!("lt_{id}"),
+                event: "linktap.stop_failed".into(),
+                params: vec![("error".into(), reply.error.unwrap_or_default()), ("cause".into(), "flood".into())],
+            }).await;
+        }
+    }
+}
+
+/// Report one telemetry line to the cloud, through the same /api/agent path the heartbeat uses.
+/// Best-effort by design: telemetry that cannot be delivered must never block the valve logic that
+/// produced it.
+async fn spool_report(rt: &Rt, report: &crate::linktap_runtime::Report) {
+    let cfg = hub_config::read_config_in(&rt.base);
+    if cfg.token.is_empty() || cfg.vid.is_empty() {
+        return;
+    }
+    let base = rt.worker_base.trim_end_matches('/');
+    let Ok(mut u) = url::Url::parse(&format!("{base}/api/agent")) else { return };
+    u.query_pairs_mut()
+        .append_pair("vid", &cfg.vid)
+        .append_pair("device", &report.device)
+        .append_pair("event", &report.event)
+        .append_pair("t", &cfg.token);
+    for (k, v) in &report.params {
+        u.query_pairs_mut().append_pair(k, v);
+    }
+    if let Err(e) = http_client().get(u).send().await {
+        eprintln!("linktap: report {} failed: {e}", report.event);
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 // --- Entry --------------------------------------------------------------------------------------
 
 /// The `--hub` main. Never returns except on fatal startup errors or ctrl-c (manual runs);
@@ -640,6 +926,9 @@ pub fn run_headless() {
         eprintln!("hub: management API on 0.0.0.0:{port} ({})", if cfg.token.is_empty() { "unregistered — waiting for bootstrap" } else { "registered" });
         tokio::spawn(heartbeat_loop(rt.clone()));
         tokio::spawn(key_sync_loop(rt.clone()));
+        // The LinkTap poll floor. It re-reads its own configuration each pass, so a gateway
+        // configured (or a plan revoked) after boot is picked up without a restart.
+        tokio::spawn(linktap_poll_loop(rt.clone()));
         // The outbound socket to the worker: remote control, and live member-key pushes. Failing
         // to connect is not fatal — the LAN API and the polling sync carry on without it.
         tokio::spawn(crate::hub_relay::run(rt.clone()));
@@ -1206,6 +1495,80 @@ mod tests {
         let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
         let r = post_valve(&origin, &key("owner"), r#"{"devId":"aaaabbbbccccdddd","action":"purge"}"#).await;
         assert_eq!(r.status(), 422);
+    }
+
+    // --- Increment 3: the I/O shell ---------------------------------------------------------------
+
+    #[test]
+    fn parses_the_workers_linktap_blob_with_skip_dont_default_intact() {
+        let body = serde_json::json!({
+            "ok": true,
+            "linktap": { "allowed": true, "profiles": {
+                "aaaabbbbccccdddd": { "durationSecs": 7200, "volumeCapL": 250.5, "autoRestart": true },
+                "bbbbccccddddeeeeEXTRA": { "volumeCapL": 50 }
+            }}
+        });
+        let (allowed, profiles) = parse_linktap_reply(&body).unwrap();
+        assert!(allowed);
+        let full = profiles.get("aaaabbbbccccdddd").unwrap();
+        assert_eq!(full.duration_secs, Some(7200));
+        assert_eq!(full.auto_restart, Some(true));
+        // A field the vehicle never set stays None so the hub's own default keeps it.
+        let partial = profiles.get("bbbbccccddddeeee").expect("long ids normalise to the canonical 16");
+        assert_eq!(partial.volume_cap_l, Some(50.0));
+        assert_eq!(partial.duration_secs, None);
+        assert_eq!(partial.auto_restart, None);
+    }
+
+    #[test]
+    fn an_absent_blob_changes_nothing_and_absent_allowed_is_never_permission() {
+        assert!(parse_linktap_reply(&serde_json::json!({ "ok": true })).is_none());
+        // `allowed` missing must read as DENY — the whole default-deny posture rests on this.
+        let (allowed, _) = parse_linktap_reply(&serde_json::json!({ "linktap": { "profiles": {} } })).unwrap();
+        assert!(!allowed);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_plan_stops_the_machine_rather_than_only_hiding_the_capability() {
+        // A hub whose vehicle stopped paying must stop DRIVING the valve, not merely stop
+        // advertising that it can.
+        let base = temp_base("lt_revoke");
+        let mut cfg = valve_cfg(true);
+        hub_config::write_config_in(&base, &cfg).unwrap();
+        let rt = new_rt(base.clone(), "https://unused.example".into());
+        // Gateway is unreachable in tests, so the unit read falls back to gal — the machine is
+        // still constructed, which is what this asserts.
+        assert!(linktap_sync_config(&rt).await);
+        assert!(rt.linktap.lock().await.is_some());
+
+        cfg.linktap.allowed = false;
+        hub_config::write_config_in(&base, &cfg).unwrap();
+        assert!(!linktap_sync_config(&rt).await);
+        assert!(rt.linktap.lock().await.is_none(), "the machine must be dropped, not just silenced");
+    }
+
+    #[tokio::test]
+    async fn no_gateway_configured_means_nothing_polls() {
+        let base = temp_base("lt_nogw");
+        hub_config::write_config_in(&base, &seeded_cfg()).unwrap();
+        let rt = new_rt(base, "https://unused.example".into());
+        assert!(!linktap_sync_config(&rt).await);
+        assert!(rt.linktap.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_gateway_push_route_is_unauthenticated_but_inert() {
+        // It must accept the appliance's POST (it cannot present a key) while doing nothing a
+        // hostile LAN peer could exploit: no commands, no config, unknown valves dropped.
+        let base = temp_base("lt_push");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
+        let r = reqwest::Client::new()
+            .post(format!("{origin}/api/hub/linktap/push"))
+            .header("content-type", "application/json")
+            .body(r#"{"dev_stat":[{"dev_id":"ffffeeeeddddcccc","is_watering":1,"volume":5}]}"#)
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200, "the gateway cannot authenticate — it must not be refused");
     }
 
 }

@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use crate::cycle::{self, Action, EndReason, Ledger, Mode, Profile, State};
+use crate::cycle::{self, Action, EndReason, Ledger, Profile, State};
 use crate::linktap::{self, Gateway, VolUnit};
 
 /// One valve's live state on this hub.
