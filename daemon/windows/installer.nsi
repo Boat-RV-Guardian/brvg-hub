@@ -1,0 +1,166 @@
+; The BRVG HUB's own Windows installer (owner ruling 2026-08-19: "the hub needs to be its own
+; installer and application for both OSX and windows. you can install a hub only on both platforms
+; without the UI"). It is standalone -- a boat computer can run ONLY this, with no BRVG app at all --
+; and it is also the installer the app's own setup bundles and offers to launch, which is the
+; owner's "separate installer triggered either during the installation process or from the app's
+; menu".
+;
+; The hub's own choice lives HERE, not in the app's installer: one owner of the question, and the
+; standalone and bundled paths cannot drift into asking it differently.
+;
+; SILENT USE (what the app's installer and the app's Hub screen drive):
+;   brvg-hub-setup.exe /S              -> install, auto-start ON  (the sane default for a boat)
+;   brvg-hub-setup.exe /S /MANUAL      -> install, auto-start OFF (installed but not at boot)
+;   brvg-hub-setup.exe /S /UNINSTALL   -> remove service, binary and config
+
+Unicode true
+!include "MUI2.nsh"
+!include "FileFunc.nsh"
+!include "LogicLib.nsh"
+
+!define HUB_NAME "Boat & RV Guardian Hub"
+!define TASK_NAME "BoatRVGuardianHub"
+; Admins+SYSTEM full control, BUILTIN\Users READ. Without the Users entry a standard user's app
+; cannot SEE the task and reports "not installed" over a running hub -- found live on CENTRAL,
+; 2026-08-19 (app #417). Keep this identical to hub_service.rs's TASK_SDDL.
+!define TASK_SDDL "O:BAD:(A;;FA;;;BA)(A;;FA;;;SY)(A;;GR;;;BU)"
+
+Name "${HUB_NAME}"
+OutFile "brvg-hub-windows-setup.exe"
+; The hub is a machine service: its binary and config live under ProgramData and its task runs as
+; SYSTEM. There is no per-user variant to offer, so the installer simply requires admin.
+RequestExecutionLevel admin
+InstallDir "$PROGRAMDATA\BoatRVGuardian"
+ShowInstDetails show
+SetCompressor /SOLID lzma
+
+Var AutoStart          ; "1" = start with the computer, "0" = manual only
+Var Dlg
+Var RbAuto
+Var RbManual
+
+!define MUI_ABORTWARNING
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfUninstalling
+!insertmacro MUI_PAGE_WELCOME
+Page custom StartupPageCreate StartupPageLeave
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
+
+Function SkipIfUninstalling
+FunctionEnd
+
+; The owner's second group, verbatim in intent: "Install - (Auto-Start)" / "Install - Manual Start".
+; "Do not install" is this installer's Cancel -- declining to install a hub is declining to run this.
+Function StartupPageCreate
+  !insertmacro MUI_HEADER_TEXT "Hub startup" "Decide when the hub should run."
+  nsDialogs::Create 1018
+  Pop $Dlg
+  ${If} $Dlg == error
+    Abort
+  ${EndIf}
+
+  ${NSD_CreateLabel} 0 0 100% 26u "The hub runs in the background and carries this vehicle's local work -- gateway telemetry, local control and cloud reporting -- even when nobody is signed in."
+  Pop $0
+
+  ${NSD_CreateRadioButton} 0 34u 100% 12u "Start the hub with this computer  (recommended)"
+  Pop $RbAuto
+  ${NSD_CreateLabel} 12u 47u 100% 10u "For a boat or RV you leave unattended. Runs before anyone logs in."
+  Pop $0
+
+  ${NSD_CreateRadioButton} 0 63u 100% 12u "Install, but start it manually"
+  Pop $RbManual
+  ${NSD_CreateLabel} 12u 76u 100% 10u "For testing. The hub reports nothing until someone starts it."
+  Pop $0
+
+  ${NSD_Check} $RbAuto
+  nsDialogs::Show
+FunctionEnd
+
+Function StartupPageLeave
+  ${NSD_GetState} $RbManual $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $AutoStart "0"
+  ${Else}
+    StrCpy $AutoStart "1"
+  ${EndIf}
+FunctionEnd
+
+; Silent installs never see the page, so read the flags here and default to auto-start.
+Function .onInit
+  StrCpy $AutoStart "1"
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/MANUAL" $R1
+  ${IfNot} ${Errors}
+    StrCpy $AutoStart "0"
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R0 "/UNINSTALL" $R1
+  ${IfNot} ${Errors}
+    Call RemoveEverything
+    SetErrorLevel 0
+    Quit
+  ${EndIf}
+FunctionEnd
+
+Section "Hub" SecHub
+  SetOutPath "$INSTDIR\bin"
+  File "brvg-hub.exe"
+
+  DetailPrint "Registering the hub's background service..."
+  ; ONSTART under SYSTEM: the boot-before-login shape. /F so a re-install repairs rather than fails.
+  nsExec::ExecToLog 'schtasks /Create /F /TN "${TASK_NAME}" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR "\"$INSTDIR\bin\brvg-hub.exe\""'
+  Pop $0
+  ${If} $0 != 0
+    DetailPrint "WARNING: could not register the service (schtasks exit $0)."
+  ${EndIf}
+
+  ; Let every signed-in account SEE the service. See TASK_SDDL above.
+  nsExec::ExecToLog 'powershell -NoProfile -Command "$$s = New-Object -ComObject Schedule.Service; $$s.Connect(); $$s.GetFolder(\"\\\").GetTask(\"${TASK_NAME}\").SetSecurityDescriptor(\"${TASK_SDDL}\", 0)"'
+  Pop $0
+
+  ${If} $AutoStart == "1"
+    DetailPrint "The hub will start with this computer."
+    nsExec::ExecToLog 'schtasks /Run /TN "${TASK_NAME}"'
+    Pop $0
+  ${Else}
+    DetailPrint "Installed. The hub will only start when told to."
+    nsExec::ExecToLog 'schtasks /Change /TN "${TASK_NAME}" /Disable'
+    Pop $0
+  ${EndIf}
+
+  WriteUninstaller "$INSTDIR\uninstall-hub.exe"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "DisplayName" "${HUB_NAME}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "UninstallString" '"$INSTDIR\uninstall-hub.exe"'
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "Publisher" "SC4 Tech"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "InstallLocation" "$INSTDIR"
+SectionEnd
+
+; Shared by the uninstaller and /UNINSTALL. Removes the service, the binary AND the hub's config --
+; the config holds a cloud credential, and leaving it behind with nothing able to clean it up is
+; worse than removing it. Revoking that credential cloud-side is the app's job, separately.
+Function RemoveEverything
+  nsExec::ExecToLog 'schtasks /End /TN "${TASK_NAME}"'
+  Pop $0
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "${TASK_NAME}"'
+  Pop $0
+  RMDir /r "$PROGRAMDATA\BoatRVGuardian\bin"
+  Delete "$PROGRAMDATA\BoatRVGuardian\hub.json"
+  Delete "$PROGRAMDATA\BoatRVGuardian\uninstall-hub.exe"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub"
+FunctionEnd
+
+Section "Uninstall"
+  nsExec::ExecToLog 'schtasks /End /TN "${TASK_NAME}"'
+  Pop $0
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "${TASK_NAME}"'
+  Pop $0
+  RMDir /r "$INSTDIR\bin"
+  Delete "$INSTDIR\hub.json"
+  Delete "$INSTDIR\uninstall-hub.exe"
+  RMDir "$INSTDIR"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub"
+SectionEnd
