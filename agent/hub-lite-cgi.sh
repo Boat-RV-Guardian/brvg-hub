@@ -57,6 +57,16 @@ spool_line() {
 if [ "$urgent" = "1" ] && [ -f "$CONF" ]; then
   # shellcheck disable=SC1090
   . "$CONF"
+  # LOCAL FLOOD -> VALVE SHUTOFF, before the cloud send (hub-lite capability #1, owner
+  # 2026-08-19): the close must not wait on the WAN — with the LinkTap cloud gone this is the
+  # only automated close when the uplink is down. Deliberately independent of DEVICE_TOKEN:
+  # closing a valve on the LAN needs no cloud credential. One-shot sourcing of the agent, same
+  # pattern as spool_to_items below, so the classifier and the close live in ONE place.
+  if [ -n "${LINKTAP_HOST:-}" ]; then
+    LINKTAP_HOST="$LINKTAP_HOST" LINKTAP_GW_ID="${LINKTAP_GW_ID:-}" LINKTAP_DEV_IDS="${LINKTAP_DEV_IDS:-}" \
+    BRVG_RELAY_SPOOL="$SPOOL" BRVG_AGENT_TEST=1 \
+      sh -c ". \"${BRVG_AGENT_BIN:-/usr/bin/brvg-agent}\"; is_flood_shutoff \"$event\" && linktap_flood_close" 2>/dev/null || true
+  fi
   if [ -n "${DEVICE_TOKEN:-}" ] && [ -n "${VID:-}" ] && [ -n "${DEVICE_ID:-}" ]; then
     # Single-item batch, NO seq: this path never retries (failure falls through to the spool,
     # which has its own seq), so idempotency isn't needed and must not be claimed.

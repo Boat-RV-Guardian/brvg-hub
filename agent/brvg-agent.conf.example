@@ -56,6 +56,16 @@ RECEIVER_PORT=8181
 # leave the cloud's view stale.
 KEYFRAME_EVERY=6
 
+# --- LinkTap gateway (hub-only model, owner 2026-08-19) -----------------------------------------
+# The LinkTap gateway on this LAN, controlled locally over HTTP — no LinkTap cloud. Same names as
+# the TypeScript hub's env (LINKTAP_HOST etc.), so one enrollment config drives either tier.
+# When set, a flood alarm arriving at the relay receiver closes every listed valve BEFORE the
+# cloud send (works with the uplink down). Empty = feature off.
+LINKTAP_HOST=""
+LINKTAP_GW_ID=""
+# Comma-separated 16-hex valve ids.
+LINKTAP_DEV_IDS=""
+
 # --- Bandwidth saver mode -----------------------------------------------------------------------
 # When lockdown is armed to control metered-SIM spend (not merely to structure the LAN), set this
 # to 1: the hub watchdog below is DISABLED and lockdown FAILS CLOSED — a dead hub means a silent
