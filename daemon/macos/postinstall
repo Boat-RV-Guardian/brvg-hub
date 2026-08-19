@@ -1,0 +1,6 @@
+#!/bin/sh
+# Load (or reload) the daemon right away — an installer that leaves the service dead until reboot
+# reads as a broken install. bootout first so an upgrade over a running hub swaps binaries cleanly.
+launchctl bootout system/com.sc4tech.brvg-hub 2>/dev/null || true
+launchctl bootstrap system /Library/LaunchDaemons/com.sc4tech.brvg-hub.plist
+exit 0

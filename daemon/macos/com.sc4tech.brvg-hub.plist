@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The hub's LaunchDaemon: the macOS twin of the Windows ONSTART scheduled task. RunAtLoad starts
+     it at boot BEFORE any login; KeepAlive restarts it if it dies — a hub is an appliance, and on
+     a boat, power blips are routine. Installed by the pkg to /Library/LaunchDaemons. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sc4tech.brvg-hub</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/BoatRVGuardian/bin/brvg-hub</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/Library/Application Support/BoatRVGuardian/brvg-hub.log</string>
+</dict>
+</plist>
