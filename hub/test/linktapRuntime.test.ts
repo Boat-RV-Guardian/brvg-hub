@@ -172,3 +172,57 @@ describe('parseGatewayPush', () => {
     expect(parseGatewayPush('{}')).toEqual([]);
   });
 });
+
+describe('profiles over the wire (config-as-state)', () => {
+  it('a wire profile overrides the env default per valve, field by field', async () => {
+    const gw = fakeGateway('L');
+    const { rt } = makeRuntime(gw); // env: 24h / 100 L
+    await rt.ensureVolUnit();
+    rt.applyProfiles({ [DEV]: { volumeCapL: 250 } }); // duration unset ⇒ env default holds
+    const p = rt.profileFor(DEV);
+    expect(p.volumeCapL).toBe(250);
+    expect(p.durationSecs).toBe(24 * 3600);
+  });
+
+  it('the software cutoff uses the wire cap the moment it applies', async () => {
+    const gw = fakeGateway('L');
+    const { rt, advance } = makeRuntime(gw);
+    await rt.ensureVolUnit();
+    rt.applyProfiles({ [DEV]: { volumeCapL: 30 } });
+    await rt.observe(DEV, { is_watering: 1, volume: 10 });
+    advance(60_000);
+    await rt.observe(DEV, { is_watering: 1, volume: 31 }); // over the WIRE cap, under the env 100
+    expect(gw.commands.filter((c) => c.cmd === 7)).toHaveLength(1);
+  });
+
+  it('wire autoRestart drives the restart decision', async () => {
+    const gw = fakeGateway('L');
+    const { rt, advance } = makeRuntime(gw, { autoRestart: false }); // env says no
+    await rt.ensureVolUnit();
+    rt.applyProfiles({ [DEV]: { autoRestart: true, durationSecs: 600, volumeCapL: 100 } });
+    await rt.startNormalRun(DEV);
+    advance(590_000);
+    await rt.observe(DEV, { is_watering: 1, volume: 10 });
+    advance(20_000);
+    await rt.observe(DEV, { is_watering: 0, volume: 10 }); // timer expiry
+    expect(gw.commands.filter((c) => c.cmd === 6)).toHaveLength(2); // restarted per the wire profile
+  });
+
+  it('ignores profiles for valves this hub does not watch, and normalises long ids', async () => {
+    const gw = fakeGateway('L');
+    const { rt } = makeRuntime(gw);
+    rt.applyProfiles({ ffffeeeeddddcccc: { volumeCapL: 1 }, [DEV + '0042']: { volumeCapL: 77 } });
+    expect(rt.profileFor(DEV).volumeCapL).toBe(77); // long id normalised onto the watched valve
+  });
+
+  it('startNormalRun issues the wire duration and cap', async () => {
+    const gw = fakeGateway('L');
+    const { rt } = makeRuntime(gw);
+    await rt.ensureVolUnit();
+    rt.applyProfiles({ [DEV]: { durationSecs: 7200, volumeCapL: 50 } });
+    await rt.startNormalRun(DEV);
+    const start = gw.commands.find((c) => c.cmd === 6);
+    expect(start.duration).toBe(7200);
+    expect(start.volume_limit).toBe(50); // litre gateway: no conversion
+  });
+});

@@ -41,6 +41,8 @@ interface ValveTrack {
   ledger: DailyLedger | null;
   /** The last is_flm_plugin seen — a non-metering valve is bounded by TIME only, say so once. */
   meters: boolean | null;
+  /** Per-valve profile from the worker (config-as-state); missing pieces fall to the env default. */
+  profile?: { durationSecs?: number; volumeCapL?: number; autoRestart?: boolean };
 }
 
 /**
@@ -59,6 +61,30 @@ export class LinkTapRuntime {
   }
 
   private track(devId: string): ValveTrack | undefined { return this.tracks.get(devId); }
+
+  /** The effective profile for one valve: the wire profile's fields over the env default's. */
+  profileFor(devId: string): NormalProfile & { autoRestart: boolean } {
+    const wire = this.track(devId)?.profile;
+    return {
+      durationSecs: wire?.durationSecs ?? this.o.profile.durationSecs,
+      volumeCapL: wire?.volumeCapL ?? this.o.profile.volumeCapL,
+      autoRestart: wire?.autoRestart ?? this.o.autoRestart,
+    };
+  }
+
+  /**
+   * Apply per-valve profiles from a worker reply. Whole-map semantics per valve: the worker
+   * recomputes from the vehicle's device records every delivery, so what arrives IS the current
+   * truth for the valves it names; valves it does not name keep the env default (a field nobody
+   * set is omitted upstream on purpose — see the worker's skip-don't-default rule).
+   */
+  applyProfiles(profiles: Record<string, { durationSecs?: number; volumeCapL?: number; autoRestart?: boolean }> | undefined): void {
+    if (!profiles) return;
+    for (const [rawId, prof] of Object.entries(profiles)) {
+      const t = this.track(rawId.slice(0, 16));
+      if (t) t.profile = prof;
+    }
+  }
 
   /** Read the gateway's volume unit once; every volume number in the protocol is in this unit. */
   async ensureVolUnit(): Promise<void> {
@@ -93,7 +119,7 @@ export class LinkTapRuntime {
       remainSecs: Number.isFinite(remainRaw) && remainRaw > 0 ? remainRaw : undefined,
     };
 
-    const r = step(t.state, obs, this.o.profile);
+    const r = step(t.state, obs, this.profileFor(devId));
     t.state = r.state;
 
     if (r.action.do === 'stop') {
@@ -129,7 +155,7 @@ export class LinkTapRuntime {
       mode: ended.mode, reason: ended.reason, vol_l: ended.volumeL.toFixed(2), provenance: ended.provenance,
     });
 
-    if (shouldAutoRestart(ended, this.o.autoRestart)) {
+    if (shouldAutoRestart(ended, this.profileFor(devId).autoRestart)) {
       this.o.log(`linktap: ${devId} timer expired with auto-restart on — starting a fresh Normal Run`);
       void this.startNormalRun(devId);
     }
@@ -139,7 +165,7 @@ export class LinkTapRuntime {
   async startNormalRun(devId: string): Promise<boolean> {
     const t = this.track(devId);
     if (!t) return false;
-    const { durationSecs, volumeCapL } = this.o.profile;
+    const { durationSecs, volumeCapL } = this.profileFor(devId);
     // volume_limit is sent in the GATEWAY's unit — and not trusted; the machine enforces the cut.
     const capInGatewayUnit = this.volUnit === 'gal' ? volumeCapL / 3.785411784 : volumeCapL;
     const reply = await postCommand(
