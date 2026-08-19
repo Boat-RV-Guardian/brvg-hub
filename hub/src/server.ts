@@ -7,6 +7,7 @@ import { parseWebhook } from './receiver.js';
 import { buildUrgent } from './contract.js';
 import { startNmeaClient, createReportGovernor, fixToParams, type NmeaClientHandle } from './nmea.js';
 import { pollCradlepoint } from './cradlepoint.js';
+import { LinkTapRuntime, parseGatewayPush } from './linktapRuntime.js';
 import type { HubConfig } from './config.js';
 import type { Sender } from './sender.js';
 
@@ -69,6 +70,29 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
     log(`drain seq=${r.seq} ${r.kind} items=${r.items} ok=${r.ok} ${r.sent ? '' : `(failed x${agg.consecutiveFailures}, will retry)`}`);
   };
 
+  // ── LinkTap (hub-only model, owner 2026-08-19) ─────────────────────────────────────────────
+  // The gateway lives on the LAN; this hub is its only controller. Push primary (the gateway's
+  // HTTP client aimed at POST /linktap here), cmd-3 poll as the floor.
+  let linktap: LinkTapRuntime | null = null;
+  if (config.linktapHost && config.linktapGwId && config.linktapDevIds.length) {
+    linktap = new LinkTapRuntime({
+      target: { host: config.linktapHost, gatewayId: config.linktapGwId },
+      devIds: config.linktapDevIds,
+      profile: { durationSecs: config.linktapNormalSecs, volumeCapL: config.linktapNormalVolL },
+      autoRestart: config.linktapAutoRestart,
+      spool: (item) => agg.add(item),
+      log,
+    });
+    log(`linktap: watching ${config.linktapDevIds.length} valve(s) via ${config.linktapHost}, poll floor ${config.linktapPollSec}s`);
+  }
+
+  // Local flood → valve shutoff: hub-lite capability #1 (owner pick, 2026-08-19). The SAME
+  // classification line the worker uses (events.ts isFloodShutoff — flood/leak/alarm, not a
+  // clear, not telemetry), so the hub closes the valve on exactly the events the cloud would
+  // have. This is now the ONLY automated close path when the vessel's internet is down.
+  const isFloodShutoff = (event: string) =>
+    /flood|leak|alarm/i.test(event) && !/(?:_off|\.off)$/i.test(event) && !/\.(measurement|change)$/.test(event);
+
   const server = createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://localhost');
     // Answer the sleepy sensor FIRST — it is awake on borrowed battery. Work happens after.
@@ -90,6 +114,19 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
       }));
       return;
     }
+    // Gateway HTTP-push (vendor doc §4.1): full status on every change + a 2-min heartbeat,
+    // POSTed here once the gateway's HTTP client is aimed at this hub. Same payload shape as the
+    // cmd 3 reply, so it funnels into the same observe() the poll uses.
+    if (url.pathname === '/linktap' && linktap) {
+      let body = '';
+      req.on('data', (c) => { body += c; if (body.length > 64 * 1024) req.destroy(); });
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('ok');
+        for (const { devId, data } of parseGatewayPush(body)) void linktap!.observe(devId, data);
+      });
+      return;
+    }
     if (url.pathname !== '/cgi-bin/report' && url.pathname !== '/report') {
       res.writeHead(404); res.end('not found'); return;
     }
@@ -99,6 +136,13 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
     const parsed = parseWebhook(url.searchParams);
     if (!parsed) return;
     if (parsed.urgent) {
+      // LOCAL flood → valve shutoff, BEFORE the cloud send: the close must not wait on the WAN.
+      // The valve self-limits regardless (every open carries duration+volume), so this only ever
+      // closes it sooner — same safety model as the app's bilge shutoff.
+      if (linktap && isFloodShutoff(parsed.item.event)) {
+        log(`flood shutoff: ${parsed.item.device} ${parsed.item.event} — closing all valves`);
+        void linktap.floodStopAll();
+      }
       // Alarms never wait for the roll-up. Fire immediately, on their own. (Through `deliver`, so
       // even an urgent reply can carry commands and flush acks.)
       void deliver(buildUrgent(parsed.item, HUB_VERSION)).then((ok) => {
@@ -146,11 +190,21 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
     cpTimer.unref?.();
   }
 
+  // The LinkTap poll floor. Push-configured gateways make most polls redundant — the aggregator's
+  // unchanged-signature dedup keeps them off the wire.
+  let ltTimer: ReturnType<typeof setInterval> | null = null;
+  if (linktap) {
+    const poll = () => void linktap!.pollOnce();
+    poll();
+    ltTimer = setInterval(poll, config.linktapPollSec * 1000);
+    ltTimer.unref?.();
+  }
+
   const timer = setInterval(() => { void drain(); }, config.drainIntervalSec * 1000);
   timer.unref?.();
 
   return {
     server,
-    stop: () => new Promise((resolve) => { nmea?.stop(); if (cpTimer) clearInterval(cpTimer); if (drainSoon) clearTimeout(drainSoon); clearInterval(timer); server.close(() => resolve()); }),
+    stop: () => new Promise((resolve) => { nmea?.stop(); if (cpTimer) clearInterval(cpTimer); if (ltTimer) clearInterval(ltTimer); if (drainSoon) clearTimeout(drainSoon); clearInterval(timer); server.close(() => resolve()); }),
   };
 }
