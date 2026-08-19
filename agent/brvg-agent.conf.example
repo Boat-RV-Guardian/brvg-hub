@@ -65,6 +65,13 @@ LINKTAP_HOST=""
 LINKTAP_GW_ID=""
 # Comma-separated 16-hex valve ids.
 LINKTAP_DEV_IDS=""
+# Cycle semantics on hub-lite (parity port of the hub's cycle machine): poll cadence and the
+# Normal Run profile. SAME names as the TypeScript hub's env. The software volume cutoff and
+# restart-only-on-timer run here on the router, so they work with the WAN down.
+LINKTAP_POLL=120
+LINKTAP_NORMAL_SECS=86400
+LINKTAP_NORMAL_VOL_L=378
+LINKTAP_AUTO_RESTART=0
 
 # --- Bandwidth saver mode -----------------------------------------------------------------------
 # When lockdown is armed to control metered-SIM spend (not merely to structure the LAN), set this

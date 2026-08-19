@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.10.0"
+AGENT_VERSION="0.11.0"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -1034,6 +1034,144 @@ linktap_flood_close() {
   done
 }
 
+# --- LinkTap: cycle semantics on hub-lite (parity port of hub/src/cycle.ts) ---------------------
+# Owner doctrine 2026-08-19: "hub lite should do anything a hub can do as long as it is not
+# CPU/memory restrictive." This is the schedules port: the SAME decision table as the TypeScript
+# cycle machine — the shared fixtures in test.sh mirror test/cycle.test.ts case for case, which is
+# what keeps two implementations from diverging (the one-contract rule).
+#
+# Scope of this increment: NORMAL RUNS only (poll, software volume cutoff, end-reason
+# classification, restart-only-on-timer, adoption of external opens). Washdown/tank fill stay
+# app/hub-driven; the ledger stays on the TS hub. State lives in tmpfs — a reboot loses it and the
+# ADOPTION rule rebuilds it from the gateway's own answer, exactly like the TS hub's restart rule.
+
+# Parse a cmd 3 reply (possibly HTML-wrapped) to "watering volumeL remain". $1 = vol unit
+# (gal|L). Volume is converted to LITRES here so every comparison downstream is one unit; the
+# idle garbage latch (>100000 — a closed GW-02 sat at 15.9M) reads as 0, never as water.
+lt_parse_status() {
+  awk -v unit="$1" '
+    { buf = buf $0 }
+    END {
+      w = 0
+      if (buf ~ /"is_watering":[[:space:]]*(true|1|"true"|"1")/) w = 1
+      vol = 0
+      if (match(buf, /"volume":[[:space:]]*[0-9.]+/)) {
+        v = substr(buf, RSTART, RLENGTH); sub(/.*:/, "", v); vol = v + 0
+        if (vol < 0 || vol > 100000) vol = 0
+        else if (unit == "gal") vol = vol * 3.785411784
+      }
+      rem = ""
+      if (match(buf, /"remain_duration":[[:space:]]*[0-9.]+/)) {
+        r = substr(buf, RSTART, RLENGTH); sub(/.*:/, "", r); rem = int(r + 0)
+      }
+      printf "%d %.3f %s\n", w, vol, rem
+    }'
+}
+
+# The decision table, PURE — mirrors cycle.ts step() + shouldAutoRestart(). Args:
+#   $1 prev ("idle" | "watering"), $2 now-watering (0/1), $3 volumeL, $4 capL (0 = none),
+#   $5 stop_issued ("" | volume_cap | manual | flood_shutoff), $6 elapsedSecs, $7 durationSecs
+# Prints ONE word: adopt | cut | none | ended:<reason>
+lt_decide() {
+  _prev="$1"; _now="$2"; _vol="$3"; _cap="$4"; _stop="$5"; _elapsed="$6"; _dur="$7"
+  if [ "$_prev" = "idle" ]; then
+    [ "$_now" = "1" ] && { echo adopt; return; }
+    echo none; return
+  fi
+  if [ "$_now" = "1" ]; then
+    # The software cutoff: the hardware "often ignores volume limits passed to cmd 6".
+    if [ -z "$_stop" ] && awk -v v="$_vol" -v c="$_cap" 'BEGIN{exit !(c > 0 && v >= c)}'; then
+      echo cut; return
+    fi
+    echo none; return
+  fi
+  # Closed. Classify: what we DID outranks inference (the order that fixes the restart bug).
+  if [ -n "$_stop" ]; then echo "ended:$_stop"; return; fi
+  if awk -v v="$_vol" -v c="$_cap" 'BEGIN{exit !(c > 0 && v >= c)}'; then echo "ended:volume_cap"; return; fi
+  if [ "$_elapsed" -ge $(( _dur - 60 )) ] 2>/dev/null; then echo "ended:timer"; return; fi
+  echo "ended:unknown"
+}
+
+# ONLY a timer expiry restarts (cycle.ts shouldAutoRestart). $1 reason, $2 enabled (0/1).
+lt_should_restart() {
+  [ "$2" = "1" ] && [ "$1" = "timer" ]
+}
+
+# cmd 6 body — duration SECONDS, volume_limit in the GATEWAY unit ($3 already converted).
+lt_start_body() {
+  printf '{"cmd":6,"gw_id":"%s","dev_id":"%s","duration":%d,"volume_limit":%s}' "$1" "$2" "$3" "$4"
+}
+
+# One poll pass over every configured valve. State per valve in $LT_STATE_DIR/<dev>:
+#   state=idle|watering  started=<epoch>  stop= |volume_cap|manual|flood_shutoff
+LT_STATE_DIR="${LT_STATE_DIR:-/tmp/brvg-linktap}"
+
+linktap_tick() {
+  [ -n "${LINKTAP_HOST:-}" ] && [ -n "${LINKTAP_GW_ID:-}" ] && [ -n "${LINKTAP_DEV_IDS:-}" ] || return 0
+  mkdir -p "$LT_STATE_DIR" 2>/dev/null
+  # Read the gateway's volume unit ONCE per boot (a config change needs a gateway visit anyway).
+  if [ ! -f "$LT_STATE_DIR/unit" ]; then
+    _u=$(curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
+      -d "{\"cmd\":16,\"gw_id\":\"$LINKTAP_GW_ID\"}" "http://${LINKTAP_HOST}/api.shtml" 2>/dev/null \
+      | grep -o '"vol_unit":"[^"]*"' | cut -d'"' -f4)
+    # Default GALLONS when unreadable — guessing litres under-reports the cap 3.79x (TS readVolUnit).
+    [ "$_u" = "L" ] || _u="gal"
+    echo "$_u" > "$LT_STATE_DIR/unit"
+  fi
+  _unit=$(cat "$LT_STATE_DIR/unit")
+  _dur="${LINKTAP_NORMAL_SECS:-86400}"
+  _capL="${LINKTAP_NORMAL_VOL_L:-378}"
+  _ar="${LINKTAP_AUTO_RESTART:-0}"
+
+  for _d in $(printf '%s' "$LINKTAP_DEV_IDS" | tr ',' ' '); do
+    _d=$(printf '%s' "$_d" | tr -cd 'A-Za-z0-9' | cut -c1-16)
+    [ -n "$_d" ] || continue
+    _reply=$(curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
+      -d "{\"cmd\":3,\"gw_id\":\"$LINKTAP_GW_ID\",\"dev_id\":\"$_d\"}" \
+      "http://${LINKTAP_HOST}/api.shtml" 2>/dev/null) || continue
+    set -- $(printf '%s' "$_reply" | lt_parse_status "$_unit")
+    _w="$1"; _volL="$2"
+
+    _sf="$LT_STATE_DIR/$_d"
+    _state=idle; _started=0; _stop=""
+    # shellcheck disable=SC1090
+    [ -f "$_sf" ] && . "$_sf"
+    _elapsed=$(( $(date +%s) - _started ))
+
+    _act=$(lt_decide "$_state" "$_w" "$_volL" "$_capL" "$_stop" "$_elapsed" "$_dur")
+    case "$_act" in
+      adopt)
+        # Manual press / external open IS a Normal Run with the profile cap (owner rule).
+        printf 'state=watering\nstarted=%s\nstop=\n' "$(date +%s)" > "$_sf"
+        logger -t brvg-agent "linktap: adopted a running cycle on ${_d} (Normal Run cap ${_capL}L)" 2>/dev/null || true
+        ;;
+      cut)
+        curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
+          -d "$(linktap_stop_body "$LINKTAP_GW_ID" "$_d")" "http://${LINKTAP_HOST}/api.shtml" >/dev/null 2>&1
+        printf 'state=watering\nstarted=%s\nstop=volume_cap\n' "$_started" > "$_sf"
+        logger -t brvg-agent "linktap: volume cap ${_capL}L reached on ${_d} — stop issued" 2>/dev/null || true
+        ;;
+      ended:*)
+        _reason="${_act#ended:}"
+        rm -f "$_sf"
+        printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "lt_${_d}" "linktap.cycle.change" "reason=${_reason}&vol_l=${_volL}" \
+          >> "${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
+        if lt_should_restart "$_reason" "$_ar"; then
+          _capGw=$(awk -v c="$_capL" -v u="$_unit" 'BEGIN{printf "%.2f", (u=="gal") ? c/3.785411784 : c}')
+          curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
+            -d "$(lt_start_body "$LINKTAP_GW_ID" "$_d" "$_dur" "$_capGw")" "http://${LINKTAP_HOST}/api.shtml" >/dev/null 2>&1 \
+            && printf 'state=watering\nstarted=%s\nstop=\n' "$(date +%s)" > "$_sf"
+          logger -t brvg-agent "linktap: timer expired on ${_d}, auto-restart on — fresh Normal Run" 2>/dev/null || true
+        fi
+        ;;
+      none) : ;;
+    esac
+    # Telemetry rides the roll-up, same event name as the TS hub.
+    printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "lt_${_d}" "linktap.measurement" "watering=${_w}&vol_l=${_volL}" \
+      >> "${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
+  done
+}
+
 # --- Main loop ---------------------------------------------------------------------------------
 
 main() {
@@ -1045,8 +1183,14 @@ main() {
   # the CGI failed to deliver directly.
   [ "${HUB_LITE_ENABLED:-0}" = "1" ] && trap drain_relay USR1
   _elapsed=$MODEM_INTERVAL   # first loop sends both
+  _lt_elapsed=${LINKTAP_POLL:-120}   # first loop polls the gateway too
   while :; do
     push_gps
+    if [ "$_lt_elapsed" -ge "${LINKTAP_POLL:-120}" ]; then
+      linktap_tick
+      _lt_elapsed=0
+    fi
+    _lt_elapsed=$(( _lt_elapsed + GPS_INTERVAL ))
     if [ "$_elapsed" -ge "$MODEM_INTERVAL" ]; then
       push_modem
       [ "${HUB_LITE_ENABLED:-0}" = "1" ] && drain_relay
