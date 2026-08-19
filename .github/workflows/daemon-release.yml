@@ -1,0 +1,89 @@
+# Release the hub daemon: push a `daemon-v*` tag and this builds the standalone binaries and
+# attaches them to a GitHub release, sha256s included. These artifacts are what the desktop app's
+# installer grabs (pinned by version + hash) — the app never compiles the hub (owner, 2026-08-19:
+# "It should build, have its own CI, all stand alone. The core application will then grab a hub
+# version to include in its installer, that's already compiled.")
+#
+# GitHub-hosted runners on purpose: this repo is public so they are free, and nothing here holds a
+# signing key that would demand a self-hosted box.
+name: Release hub daemon
+
+on:
+  push:
+    tags: ['daemon-v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: brvg-hub-windows-x64.exe
+          - os: macos-latest
+            artifact: brvg-hub-macos-universal
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: daemon
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Tag must match the crate version
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#daemon-v}"
+          CRATE_VER=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          [ "$TAG_VER" = "$CRATE_VER" ] || {
+            echo "::error::tag says $TAG_VER but Cargo.toml says $CRATE_VER — a release must not lie about its version" >&2
+            exit 1
+          }
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cargo build --release
+          cp target/release/brvg-hub.exe "${{ matrix.artifact }}"
+
+      - name: Build (macOS, universal)
+        if: runner.os == 'macOS'
+        # Both architectures, lipo'd — the same reasoning as the app's universal build: the owner's
+        # Macs are Intel, CI's are Apple Silicon, and one artifact must serve both.
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          lipo -create -output "${{ matrix.artifact }}" \
+            target/aarch64-apple-darwin/release/brvg-hub \
+            target/x86_64-apple-darwin/release/brvg-hub
+          lipo -archs "${{ matrix.artifact }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: daemon/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          sha256sum brvg-hub-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" brvg-hub-* SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Hub daemon ${GITHUB_REF_NAME#daemon-}" \
+            --notes "Standalone BRVG hub daemon. Verify downloads against SHA256SUMS."
