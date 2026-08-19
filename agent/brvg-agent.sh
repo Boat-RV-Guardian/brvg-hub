@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.11.0"
+AGENT_VERSION="0.12.0"
 AGENT_BACKUP="/etc/brvg-agent.prev"
 
 
@@ -276,6 +276,9 @@ EOF_DEVS2
     log "relay: drained batch seq=$_seq ($_kind)"
     _cmds=$(printf '%s' "$_resp" | parse_commands)
     [ -n "$_cmds" ] && run_commands "$_cmds"
+    # Config-as-state rides the same reply (cloud-server #100) — apply after commands so a
+    # profile edit and a verb in one reply behave like the TS hub: verb runs, state lands.
+    printf '%s' "$_resp" | lt_parse_profiles | lt_apply_profiles
   else
     rm -f "$_items_src"
     log "relay: batch seq=$_seq failed (will retry with the same seq)"
@@ -1102,6 +1105,47 @@ lt_start_body() {
   printf '{"cmd":6,"gw_id":"%s","dev_id":"%s","duration":%d,"volume_limit":%s}' "$1" "$2" "$3" "$4"
 }
 
+# Per-valve profiles from the worker reply (config-as-state; the same {linktap:{profiles}} blob
+# the TypeScript hub consumes — worker cloud-server #100). One line per valve:
+#   <devid> <durationSecs|-> <volumeCapL|-> <autoRestart 0/1/->
+# "-" = the vehicle never set that field: the conf default keeps it (skip-don't-default,
+# preserved end to end). Deliberately tiny awk — busybox has no JSON parser; the inner objects
+# are flat, so [^{}]* is exact, and the walk stops at the brace that closes "profiles" so a later
+# object-valued key in the reply can never be misread as a valve.
+lt_parse_profiles() {
+  awk '
+    { buf = buf $0 }
+    END {
+      if (!match(buf, /"linktap":[[:space:]]*\{[[:space:]]*"profiles":[[:space:]]*\{/)) exit
+      rest = substr(buf, RSTART + RLENGTH)
+      while (match(rest, /^[[:space:],]*"[A-Za-z0-9]+":[[:space:]]*\{[^{}]*\}/)) {
+        e = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        id = e; sub(/^[[:space:],]*"/, "", id); sub(/".*/, "", id); id = substr(id, 1, 16)
+        dur = "-"; vol = "-"; ar = "-"
+        if (match(e, /"durationSecs":[[:space:]]*[0-9.]+/)) { v = substr(e, RSTART, RLENGTH); sub(/.*:/, "", v); dur = int(v + 0) }
+        if (match(e, /"volumeCapL":[[:space:]]*[0-9.]+/))   { v = substr(e, RSTART, RLENGTH); sub(/.*:/, "", v); vol = v + 0 }
+        if (match(e, /"autoRestart":[[:space:]]*(true|false)/)) { v = substr(e, RSTART, RLENGTH); ar = (v ~ /true/) ? 1 : 0 }
+        if (id != "") print id, dur, vol, ar
+      }
+    }'
+}
+
+# Persist parsed profiles into $LT_STATE_DIR/profile.<dev>. Whole-file rewrite per valve named in
+# the reply: the worker recomputes the blob from the vehicle each delivery, so what arrives IS the
+# truth for those valves; valves it does not name keep whatever they had (their conf default).
+lt_apply_profiles() {
+  mkdir -p "$LT_STATE_DIR" 2>/dev/null
+  while read -r _pid _pdur _pvol _par; do
+    [ -n "$_pid" ] || continue
+    {
+      [ "$_pdur" != "-" ] && echo "P_DUR=$_pdur"
+      [ "$_pvol" != "-" ] && echo "P_VOL=$_pvol"
+      [ "$_par"  != "-" ] && echo "P_AR=$_par"
+    } > "$LT_STATE_DIR/profile.$_pid"
+  done
+}
+
 # One poll pass over every configured valve. State per valve in $LT_STATE_DIR/<dev>:
 #   state=idle|watering  started=<epoch>  stop= |volume_cap|manual|flood_shutoff
 LT_STATE_DIR="${LT_STATE_DIR:-/tmp/brvg-linktap}"
@@ -1119,13 +1163,23 @@ linktap_tick() {
     echo "$_u" > "$LT_STATE_DIR/unit"
   fi
   _unit=$(cat "$LT_STATE_DIR/unit")
-  _dur="${LINKTAP_NORMAL_SECS:-86400}"
-  _capL="${LINKTAP_NORMAL_VOL_L:-378}"
-  _ar="${LINKTAP_AUTO_RESTART:-0}"
 
   for _d in $(printf '%s' "$LINKTAP_DEV_IDS" | tr ',' ' '); do
     _d=$(printf '%s' "$_d" | tr -cd 'A-Za-z0-9' | cut -c1-16)
     [ -n "$_d" ] || continue
+    # Effective profile: the wire profile's fields over the conf defaults, FIELD BY FIELD —
+    # the same profileFor rule as the TS hub.
+    _dur="${LINKTAP_NORMAL_SECS:-86400}"
+    _capL="${LINKTAP_NORMAL_VOL_L:-378}"
+    _ar="${LINKTAP_AUTO_RESTART:-0}"
+    if [ -f "$LT_STATE_DIR/profile.$_d" ]; then
+      P_DUR=""; P_VOL=""; P_AR=""
+      # shellcheck disable=SC1090
+      . "$LT_STATE_DIR/profile.$_d"
+      [ -n "$P_DUR" ] && _dur="$P_DUR"
+      [ -n "$P_VOL" ] && _capL="$P_VOL"
+      [ -n "$P_AR" ]  && _ar="$P_AR"
+    fi
     _reply=$(curl -fsS --max-time 10 -X POST -H 'Content-Type: application/json' \
       -d "{\"cmd\":3,\"gw_id\":\"$LINKTAP_GW_ID\",\"dev_id\":\"$_d\"}" \
       "http://${LINKTAP_HOST}/api.shtml" 2>/dev/null) || continue

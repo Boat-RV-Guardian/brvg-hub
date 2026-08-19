@@ -557,3 +557,38 @@ check "restart: disabled means disabled" "no" "$_r"
 # lt_start_body — cmd 6, duration seconds, volume_limit in the gateway unit
 check "lt_start_body shape" '{"cmd":6,"gw_id":"GW02","dev_id":"aaaabbbbccccdddd","duration":86400,"volume_limit":26.42}' \
   "$(lt_start_body GW02 aaaabbbbccccdddd 86400 26.42)"
+
+# --- Wire profiles on hub-lite (config-as-state; mirrors the TS sender/runtime pair) --------------
+REPLY='{"status":"ok","stored":2,"commands":[{"id":"c1","cmd":"report_now"}],"linktap":{"profiles":{"aaaabbbbccccdddd":{"durationSecs":7200,"volumeCapL":250.5,"autoRestart":true},"bbbbccccddddeeee":{"volumeCapL":50}}}}'
+
+out=$(printf '%s' "$REPLY" | lt_parse_profiles)
+check "wire profiles: full profile parses" "aaaabbbbccccdddd 7200 250.5 1" "$(printf '%s\n' "$out" | sed -n 1p)"
+check "wire profiles: partial profile keeps '-' for unset fields (skip-don't-default)" \
+  "bbbbccccddddeeee - 50 -" "$(printf '%s\n' "$out" | sed -n 2p)"
+
+out=$(printf '{"status":"ok"}' | lt_parse_profiles)
+check "wire profiles: reply without the blob parses to nothing" "" "$out"
+
+# a later object-valued key must not be misread as a valve
+out=$(printf '{"linktap":{"profiles":{"aaaabbbbccccdddd":{"volumeCapL":10}}},"other":{"x":{"volumeCapL":99}}}' | lt_parse_profiles)
+check "wire profiles: the walk stops at the profiles-closing brace" "aaaabbbbccccdddd - 10 -" "$out"
+
+# apply → per-valve files, then the tick's field-by-field override
+_LT_T=$(mktemp -d)
+LT_STATE_DIR="$_LT_T" lt_apply_profiles <<'EOP'
+aaaabbbbccccdddd 7200 250.5 1
+bbbbccccddddeeee - 50 -
+EOP
+check "apply: full profile file" "P_DUR=7200
+P_VOL=250.5
+P_AR=1" "$(cat "$_LT_T/profile.aaaabbbbccccdddd")"
+check "apply: partial profile file carries only the set fields" "P_VOL=50" "$(cat "$_LT_T/profile.bbbbccccddddeeee")"
+
+# effective profile: wire over conf, field by field (the profileFor rule)
+P_DUR=""; P_VOL=""; P_AR=""
+. "$_LT_T/profile.bbbbccccddddeeee"
+_dur="${P_DUR:-86400}"; _capL="${P_VOL:-378}"; _ar="${P_AR:-0}"
+check "effective: wire cap wins" "50" "$_capL"
+check "effective: unset duration falls to the conf default" "86400" "$_dur"
+check "effective: unset autoRestart falls to the conf default" "0" "$_ar"
+rm -rf "$_LT_T"
