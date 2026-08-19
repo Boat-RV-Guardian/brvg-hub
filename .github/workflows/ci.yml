@@ -72,3 +72,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test
       - run: cargo build --release
+
+      # Compile the Windows installer script on every push. It only SHIPS from a daemon-v* tag, so
+      # without this its first compile would be inside a release — the worst place to discover a
+      # typo. makensis cross-builds on Linux, so this costs seconds.
+      - name: Windows installer script compiles
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y nsis
+          cp target/release/brvg-hub windows/brvg-hub.exe
+          makensis -V2 windows/installer.nsi
+          test -f windows/brvg-hub-windows-setup.exe
+          echo "installer built: $(stat -c%s windows/brvg-hub-windows-setup.exe) bytes"
