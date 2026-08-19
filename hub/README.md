@@ -1,3 +1,10 @@
+> **FROZEN — no new capability (owner ruling 2026-08-19).** The project converged on the Rust
+> daemon (`../daemon`) as the one full-hub implementation for every capable host — desktop and
+> containers alike. This TypeScript hub keeps working as-is but stops growing: new capability goes
+> in the daemon, and this implementation's LinkTap client and cycle machine are the porting source
+> (with their fixtures) for the daemon's LinkTap work. `agent/` (hub-lite) is unaffected — it is a
+> tier for constrained routers, not a duplicate.
+
 # BRVG hub (TypeScript) — Pi / Docker / desktop
 
 The **hub tier** of the on-site architecture of Boat & RV Guardian. It receives the

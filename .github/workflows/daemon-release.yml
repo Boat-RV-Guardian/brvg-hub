@@ -25,6 +25,11 @@ jobs:
             artifact: brvg-hub-windows-x64.exe
           - os: macos-latest
             artifact: brvg-hub-macos-universal
+          # Convergence ruling (owner 2026-08-19): the Rust daemon is THE full hub — desktop AND
+          # containers — and the TS hub stops growing. The linux binary is what a container image
+          # or a bare Linux box runs.
+          - os: ubuntu-latest
+            artifact: brvg-hub-linux-x64
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -48,6 +53,12 @@ jobs:
         run: |
           cargo build --release
           cp target/release/brvg-hub.exe "${{ matrix.artifact }}"
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release
+          cp target/release/brvg-hub "${{ matrix.artifact }}"
 
       - name: Build (macOS, universal)
         if: runner.os == 'macOS'
@@ -83,7 +94,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # --latest EXPLICITLY: the desktop app installs the hub through the stable
+          # `releases/latest/download/…` links (owner 2026-08-19: no version pin — "why possibly
+          # install an old version"). Those links follow whichever release is MARKED latest, so a
+          # daemon release must always claim the mark — and if this repo ever grows another release
+          # family (agent, TS hub), those must pass --latest=false or they will hijack the app's
+          # hub download.
           gh release create "$GITHUB_REF_NAME" brvg-hub-* SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
+            --latest \
             --title "Hub daemon ${GITHUB_REF_NAME#daemon-}" \
             --notes "Standalone BRVG hub daemon. Verify downloads against SHA256SUMS."
