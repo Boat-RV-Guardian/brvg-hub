@@ -518,3 +518,42 @@ if [ "$fails" -gt 0 ]; then
   exit 1
 fi
 echo "all agent parser tests passed"
+
+# --- LinkTap cycle semantics on hub-lite (parity port) -------------------------------------------
+# These fixtures MIRROR hub/test/cycle.test.ts case for case — the one-contract rule. A case added
+# there gets added here.
+
+# lt_parse_status
+out=$(printf '{"cmd":3,"dev_stat":[{"is_watering":1,"volume":0.63,"remain_duration":79940}]}' | lt_parse_status gal)
+check "lt parse: watering, gal→L conversion (0.63 gal = 2.385 L)" "1 2.385 79940" "$out"
+out=$(printf '{"is_watering":0,"volume":15886307.00}' | lt_parse_status gal)
+check "lt parse: the idle garbage latch reads as no volume" "0 0.000 " "$out"
+out=$(printf '<html><body><!--#RET-->{"is_watering":"1","volume":2,"remain_duration":60}</body></html>' | lt_parse_status L)
+check "lt parse: HTML wrap + string flag + litre unit" "1 2.000 60" "$out"
+
+# lt_decide — the decision table, mirroring cycle.test.ts
+check "decide: idle + watering = adopt (manual press IS a Normal Run)" "adopt" "$(lt_decide idle 1 0.5 100 "" 0 86400)"
+check "decide: idle + closed = none" "none" "$(lt_decide idle 0 0 100 "" 0 86400)"
+check "decide: cap reached = cut" "cut" "$(lt_decide watering 1 100.2 100 "" 300 86400)"
+check "decide: cap reached but stop already issued = none (no re-issue storm)" "none" "$(lt_decide watering 1 101 100 "volume_cap" 320 86400)"
+check "decide: under the cap = none" "none" "$(lt_decide watering 1 50 100 "" 300 86400)"
+check "decide: no cap (washdown shape) never cuts" "none" "$(lt_decide watering 1 5000 0 "" 300 7200)"
+check "decide: closed after our stop = ended:volume_cap" "ended:volume_cap" "$(lt_decide watering 0 100.5 100 "volume_cap" 350 86400)"
+check "decide: THE BUG CASE — hardware cap stop inside one poll = ended:volume_cap, not timer" "ended:volume_cap" "$(lt_decide watering 0 100.3 100 "" 120 600)"
+check "decide: closed within a minute of duration = ended:timer" "ended:timer" "$(lt_decide watering 0 40 100 "" 590 600)"
+check "decide: early close, no explanation = ended:unknown" "ended:unknown" "$(lt_decide watering 0 5 100 "" 60 600)"
+check "decide: flood stop classifies as flood_shutoff" "ended:flood_shutoff" "$(lt_decide watering 0 30 0 "flood_shutoff" 60 7200)"
+
+# lt_should_restart — only a timer expiry restarts
+lt_should_restart timer 1 && _r=yes || _r=no
+check "restart: timer + enabled = yes" "yes" "$_r"
+for reason in volume_cap manual flood_shutoff unknown; do
+  lt_should_restart "$reason" 1 && _r=yes || _r=no
+  check "restart: $reason never restarts" "no" "$_r"
+done
+lt_should_restart timer 0 && _r=yes || _r=no
+check "restart: disabled means disabled" "no" "$_r"
+
+# lt_start_body — cmd 6, duration seconds, volume_limit in the gateway unit
+check "lt_start_body shape" '{"cmd":6,"gw_id":"GW02","dev_id":"aaaabbbbccccdddd","duration":86400,"volume_limit":26.42}' \
+  "$(lt_start_body GW02 aaaabbbbccccdddd 86400 26.42)"
