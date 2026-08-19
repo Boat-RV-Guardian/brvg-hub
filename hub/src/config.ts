@@ -22,6 +22,17 @@ export interface HubConfig {
   cradlepointPassword: string;
   /** GPS poll / stationary report cadence, seconds — mirrors the shell agent's GPS_INTERVAL. */
   gpsIntervalSec: number;
+  /** LinkTap gateway on the LAN (hub-only model, owner 2026-08-19). Empty host = feature off. */
+  linktapHost: string;
+  linktapGwId: string;
+  /** The valves this hub watches — comma-separated 16-hex dev ids. */
+  linktapDevIds: string[];
+  /** Poll floor, seconds. Push (the gateway's HTTP client aimed at this hub) is the primary. */
+  linktapPollSec: number;
+  /** Normal Run profile: ALWAYS a duration and a volume cap (the three-mode rules). */
+  linktapNormalSecs: number;
+  linktapNormalVolL: number;
+  linktapAutoRestart: boolean;
 }
 
 class ConfigError extends Error {}
@@ -58,6 +69,16 @@ export function loadConfig(env: Record<string, string | undefined>): HubConfig {
     cradlepointUser: (env.CRADLEPOINT_USER || 'admin').trim(),
     cradlepointPassword: env.CRADLEPOINT_PASSWORD || '',
     gpsIntervalSec: num(env.GPS_INTERVAL, 120, 30), // same name, default and floor as the agent
+    linktapHost: (env.LINKTAP_HOST || '').trim(),
+    linktapGwId: (env.LINKTAP_GW_ID || '').trim(),
+    linktapDevIds: (env.LINKTAP_DEV_IDS || '').split(',').map((v) => v.trim().slice(0, 16)).filter(Boolean),
+    // Floor 15 s: below that the hub spends its time polling; the gateway's own push heartbeat is
+    // 2 min, so the poll is only the floor under it anyway.
+    linktapPollSec: num(env.LINKTAP_POLL_INTERVAL, 60, 15),
+    linktapNormalSecs: num(env.LINKTAP_NORMAL_SECS, 24 * 3600, 60),
+    // 378.5 L = the 100 gal Normal Run default (owner spec 2026-07-30).
+    linktapNormalVolL: num(env.LINKTAP_NORMAL_VOL_L, 378, 1),
+    linktapAutoRestart: env.LINKTAP_AUTO_RESTART === '1',
   };
 }
 
