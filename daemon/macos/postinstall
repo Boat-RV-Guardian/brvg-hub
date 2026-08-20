@@ -2,5 +2,24 @@
 # Load (or reload) the daemon right away — an installer that leaves the service dead until reboot
 # reads as a broken install. bootout first so an upgrade over a running hub swaps binaries cleanly.
 launchctl bootout system/com.sc4tech.brvg-hub 2>/dev/null || true
-launchctl bootstrap system /Library/LaunchDaemons/com.sc4tech.brvg-hub.plist
+
+# ⚠️ THE EXIT CODE IS THE WHOLE POINT OF THIS BLOCK. This script previously ran bootstrap and then
+# `exit 0` unconditionally, so a FAILED bootstrap still presented as a clean install: Installer.app
+# showed success, the app's Hub Service screen was told the service was installed, and the hub was
+# not running. The failure then surfaced much later as "registered but never heartbeats", which is
+# an expensive thing to debug from the app side because every visible signal says the install worked.
+if ! launchctl bootstrap system /Library/LaunchDaemons/com.sc4tech.brvg-hub.plist; then
+  echo "brvg-hub: launchctl bootstrap failed — the daemon is NOT running" >&2
+  exit 1
+fi
+
+# bootstrap returning 0 means launchd ACCEPTED the job, not that the process survived. A binary that
+# starts and immediately exits is accepted and then reaped, so confirm it is actually there. KeepAlive
+# would restart it, which is exactly why the naive check races: allow a moment before asking.
+sleep 1
+if ! launchctl print system/com.sc4tech.brvg-hub >/dev/null 2>&1; then
+  echo "brvg-hub: bootstrap succeeded but the job is not loaded — the daemon is NOT running" >&2
+  exit 1
+fi
+
 exit 0
