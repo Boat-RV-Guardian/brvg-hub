@@ -11,6 +11,16 @@ name: Release hub daemon
 on:
   push:
     tags: ['daemon-v*']
+  # BUILD WITHOUT PUBLISHING. Until 2026-08-20 a tag was the ONLY way to get an installer out of
+  # this workflow, and that is the direct cause of two bad releases in one day: daemon-v0.3.0
+  # shipped a Windows installer that had never been built around a real PE (the ci.yml gate feeds
+  # makensis a Linux ELF renamed .exe, so it proves the SCRIPT compiles and nothing more), and
+  # v0.3.2's installer self-check could not be exercised before tagging for the same reason.
+  #
+  # Dispatched runs build everything a tag does — including the installer and the macOS pkg — and
+  # upload it as an ARTIFACT. No GitHub release, no `latest` link moved, nothing the app can fetch.
+  # This is what runner-smoke.yml is for the desktop app: the cheap place to find out.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -39,14 +49,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Tag must match the crate version
+      # On a TAG this is the guard that stops a release lying about its version. On a DISPATCH there
+      # is no tag to check, so the crate version is simply taken as the truth — a build-only run has
+      # nothing to lie to.
+      - name: Resolve the version (and on a tag, refuse to disagree with the crate)
+        id: ver
         run: |
-          TAG_VER="${GITHUB_REF_NAME#daemon-v}"
           CRATE_VER=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          [ "$TAG_VER" = "$CRATE_VER" ] || {
-            echo "::error::tag says $TAG_VER but Cargo.toml says $CRATE_VER — a release must not lie about its version" >&2
-            exit 1
-          }
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG_VER="${GITHUB_REF_NAME#daemon-v}"
+            [ "$TAG_VER" = "$CRATE_VER" ] || {
+              echo "::error::tag says $TAG_VER but Cargo.toml says $CRATE_VER — a release must not lie about its version" >&2
+              exit 1
+            }
+            echo "ver=$TAG_VER" >> "$GITHUB_OUTPUT"
+          else
+            echo "ver=$CRATE_VER (build-only, no release)"
+            echo "ver=$CRATE_VER" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
@@ -81,7 +101,7 @@ jobs:
         # plus a LaunchDaemon so it starts at boot before any login. UNSIGNED, like everything else
         # this project ships so far — macOS will warn on first open; right-click → Open works.
         run: |
-          VER="${GITHUB_REF_NAME#daemon-v}"
+          VER="${{ steps.ver.outputs.ver }}"
           ROOT=pkgroot
           mkdir -p "$ROOT/Library/Application Support/BoatRVGuardian/bin" "$ROOT/Library/LaunchDaemons" scripts
           cp "${{ matrix.artifact }}" "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub"
@@ -132,6 +152,10 @@ jobs:
       # makensis cross-builds on Linux (same toolchain the gate uses). Paths mirror the gate
       # exactly -- NSIS resolves `File` and `OutFile` against the SCRIPT's directory, which is why
       # the binary is staged into windows/ and the output appears there too.
+      - name: Version for the artifact name
+        id: relver
+        run: echo "ver=$(grep -m1 '^version = ' daemon/Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
       - name: Build the Windows installer
         run: |
           sudo apt-get update -qq && sudo apt-get install -y nsis
@@ -147,7 +171,25 @@ jobs:
         run: |
           sha256sum brvg-hub-* > SHA256SUMS
           cat SHA256SUMS
+      # BUILD-ONLY RUNS STOP HERE. Everything above has produced real artifacts — binaries, the macOS
+      # pkg, the Windows installer, SHA256SUMS — so a dispatched run is a full rehearsal that a human
+      # can download and actually RUN. What it deliberately does NOT do is publish: no release, no
+      # moved `latest` link, so nothing the desktop app fetches can change from a test build.
+      - name: Upload the build for testing (dispatch only — publishes nothing)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-build-${{ steps.relver.outputs.ver }}
+          path: |
+            brvg-hub-*
+            SHA256SUMS
+          if-no-files-found: error
+
       - name: Create the release
+        # ⚠️ THE GUARD THAT KEEPS A TEST BUILD FROM SHIPPING. Without it, a dispatched run would cut
+        # a release named after a branch and — because of the --latest below — hijack the stable
+        # link every "Install the hub" click follows.
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
