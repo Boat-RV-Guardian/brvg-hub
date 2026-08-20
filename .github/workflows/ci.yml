@@ -66,6 +66,27 @@ jobs:
   # The Rust hub daemon (daemon/) — completely standalone by ruling (owner 2026-08-19): its own
   # build, its own CI, its own releases. The desktop app never compiles it; it downloads a pinned,
   # already-built release artifact.
+  # WINDOWS IS A SEPARATE JOB BECAUSE THE DAEMON REPO SHIPS WINDOWS-ONLY CODE.
+  #
+  # `brvg-hub-tray` draws in the notification area and drives schtasks, so none of it compiles on
+  # the Linux leg below — it is a stub there. Without this job its first real compile would happen
+  # inside a release, which is precisely the mistake that shipped a broken installer in
+  # daemon-v0.3.0: the only gate was a Linux one, and the Windows-specific half went out unbuilt.
+  #
+  # Free: brvg-hub is a public repo, so GitHub-hosted Windows minutes are not billed.
+  daemon-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: daemon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # --bins, not --lib: building the library alone would skip the tray binary entirely and this
+      # job would pass while proving nothing about the thing it exists to check.
+      - run: cargo build --bins
+      - run: cargo test
+
   daemon:
     runs-on: ubuntu-latest
     defaults:
