@@ -26,6 +26,8 @@ Unicode true
 !define TASK_SDDL "O:BAD:(A;;FA;;;BA)(A;;FA;;;SY)(A;;GR;;;BU)"
 
 Name "${HUB_NAME}"
+; TEMPORARY — throwaway branch proving -WX turns warning 6000 into a build failure.
+DetailPrint "$NOTAVARIABLE"
 OutFile "brvg-hub-windows-setup.exe"
 ; The hub is a machine service: its binary and config live under ProgramData and its task runs as
 ; SYSTEM. There is no per-user variant to offer, so the installer simply requires admin.
