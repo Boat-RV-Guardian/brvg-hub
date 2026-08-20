@@ -12,6 +12,12 @@
 ;   brvg-hub-setup.exe /S              -> install, auto-start ON  (the sane default for a boat)
 ;   brvg-hub-setup.exe /S /MANUAL      -> install, auto-start OFF (installed but not at boot)
 ;   brvg-hub-setup.exe /S /UNINSTALL   -> remove service, binary and config
+;
+; EXIT CODES (the app branches on these, so do not renumber):
+;   0  installed, and VERIFIED - the binary is on disk and the task is registered
+;   2  a hub was already running and its program file could not be replaced (try again)
+;   3  nothing usable was installed - almost always security software blocking the task or
+;      quarantining the binary; see the self-check at the end of the Hub section
 
 Unicode true
 !include "MUI2.nsh"
@@ -37,6 +43,7 @@ ShowInstDetails show
 SetCompressor /SOLID lzma
 
 Var AutoStart          ; "1" = start with the computer, "0" = manual only
+Var Failures           ; accumulated self-check findings; non-empty ⇒ refuse to report success
 Var Dlg
 Var RbAuto
 Var RbManual
@@ -171,6 +178,40 @@ Section "Hub" SecHub
     DetailPrint "Installed. The hub will only start when told to."
     nsExec::ExecToLog 'schtasks /Change /TN "${TASK_NAME}" /Disable'
     Pop $0
+  ${EndIf}
+
+  ; ---- VERIFY OUR OWN WORK BEFORE CLAIMING SUCCESS -------------------------------------------
+  ;
+  ; MEASURED ON CENTRAL, 2026-08-19. Sophos Endpoint Defense flagged the schtasks call above as
+  ; Persist_6a (MITRE T1053.005 - Scheduled Task persistence), blocked the task, and QUARANTINED
+  ; bin\brvg-hub.exe about 14 seconds later. This installer exited 0 the entire time.
+  ;
+  ; That is the worst possible outcome. A visible failure sends someone looking; a SILENT one
+  ; leaves the app's setup screen sitting on "install the service" forever with nothing to read,
+  ; on a machine where the hub will never run. An unsigned installer invoking schtasks to create a
+  ; SYSTEM boot task is a textbook persistence pattern, so this is not exotic -- Sophos Home is
+  ; consumer software, and any behavioural endpoint agent watches for it.
+  ;
+  ; So do not trust the exit codes of tools an endpoint agent can neutralise underneath us. Look
+  ; at the disk and the task store and report what is ACTUALLY there.
+  StrCpy $Failures ""
+
+  IfFileExists "$INSTDIR\bin\brvg-hub.exe" check_task 0
+    StrCpy $Failures "$Failures$\r$\n  - the hub program file is missing from $INSTDIR\bin"
+  check_task:
+
+  nsExec::ExecToLog 'schtasks /Query /TN "${TASK_NAME}"'
+  Pop $0
+  ${If} $0 != 0
+    StrCpy $Failures "$Failures$\r$\n  - the background service was not registered"
+  ${EndIf}
+
+  ${If} $Failures != ""
+    DetailPrint "INSTALL FAILED -- see the message below."
+    ; Exit code 3 = installed nothing usable. Distinct from 2 (could not replace a running hub) so
+    ; the app can tell "try again later" apart from "something on this machine refused us".
+    SetErrorLevel 3
+    Abort "The hub was NOT installed.$\r$\n$Failures$\r$\n$\r$\nThis is what security software does when it blocks an installer: the steps above are how any always-on background service is registered, and some products treat that as suspicious. Check your antivirus or endpoint protection for a blocked or quarantined item named brvg-hub, allow it, and run this installer again."
   ${EndIf}
 
   WriteUninstaller "$INSTDIR\uninstall-hub.exe"
