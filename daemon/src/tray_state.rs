@@ -89,6 +89,16 @@ pub struct Monitor {
     /// separates "the AV took it" from "there is no hub here" when BOTH the binary and the task
     /// are missing — the end state we actually measured, where nothing is left to point at.
     seen_working: bool,
+    /// Whether a hub was ever even INSTALLED here — task or binary present, answering or not.
+    ///
+    /// Found the hard way on CENTRAL, 2026-08-20: an install completed, the task and binary
+    /// existed for ~10 seconds, and Sophos removed both before the hub ever served a request. With
+    /// only `seen_working` to go on, that machine reverted to `Absent` — "no hub here" — and the
+    /// monitor went quiet about a hub that had just been destroyed in front of it.
+    seen_installed: bool,
+    /// The reason we last complained. A hub can stay `Bad` while the reason CHANGES underneath —
+    /// stopped, then its program file quarantined — and the second fact is the one worth saying.
+    last_reason: Option<Alert>,
 }
 
 impl Monitor {
@@ -98,21 +108,42 @@ impl Monitor {
 
     /// Fold one observation in. Returns the icon to show and, at most, one alert to raise.
     pub fn observe(&mut self, o: &Observation) -> (Icon, Option<Alert>) {
+        if o.task_present || o.binary_present {
+            self.seen_installed = true;
+        }
         let icon = self.classify(o);
         if icon == Icon::Ok || icon == Icon::NeedsSigning {
             self.seen_working = true;
         }
 
         // First observation establishes a baseline and never interrupts. Logging in to be told
-        // something has been true since before you arrived is noise, not news — the icon already
-        // says it, and the one case worth shouting about (a hub that DISAPPEARS) is a change by
-        // definition.
-        let alert = match self.last {
-            None => None,
-            Some(prev) if prev == icon => None,
-            Some(prev) => transition_alert(prev, icon),
+        // something has been true since before you arrived is noise, not news — the icon says it.
+        let first = self.last.is_none();
+        let was_bad = self.last == Some(Icon::Bad);
+
+        let alert = if first {
+            None
+        } else if icon == Icon::Bad {
+            // Alert on the REASON changing, not merely the icon. A hub that stops and is THEN
+            // quarantined never leaves `Bad`, so an icon-only rule would say "it stopped" and stay
+            // silent about the removal — which is the half the user has to act on.
+            let reason = Self::diagnose(o);
+            if !was_bad || self.last_reason != Some(reason) {
+                Some(reason)
+            } else {
+                None
+            }
+        } else if was_bad {
+            Some(Alert::Recovered)
+        } else {
+            None
         };
 
+        self.last_reason = if icon == Icon::Bad {
+            alert.or(self.last_reason)
+        } else {
+            None
+        };
         self.last = Some(icon);
         (icon, alert)
     }
@@ -125,8 +156,9 @@ impl Monitor {
                 Icon::NeedsSigning
             };
         }
-        // Not answering. Is there supposed to be a hub here at all?
-        if o.task_present || o.binary_present || self.seen_working {
+        // Not answering. Is a hub supposed to exist here at all? `seen_installed` is what stops a
+        // hub wiped seconds after install from reading as "this machine never had one".
+        if o.task_present || o.binary_present || self.seen_working || self.seen_installed {
             Icon::Bad
         } else {
             Icon::Absent
@@ -145,19 +177,6 @@ impl Monitor {
         } else {
             Alert::Stopped
         }
-    }
-}
-
-fn transition_alert(prev: Icon, now: Icon) -> Option<Alert> {
-    match (prev, now) {
-        // Into trouble. The caller pairs this with `Monitor::diagnose` for the specific reason.
-        (Icon::Ok | Icon::NeedsSigning, Icon::Bad) => Some(Alert::Stopped),
-        (Icon::Absent, Icon::Bad) => Some(Alert::Stopped),
-        // Out of trouble.
-        (Icon::Bad, Icon::Ok | Icon::NeedsSigning) => Some(Alert::Recovered),
-        // Signing a hub to a vehicle, or a hub appearing for the first time, is something the user
-        // just DID. Telling them it happened is the definition of a notification nobody wants.
-        _ => None,
     }
 }
 
@@ -290,6 +309,44 @@ mod tests {
         let mut m = Monitor::new();
         m.observe(&obs(true, false, true, true));
         assert_eq!(m.observe(&HEALTHY()), (Icon::Ok, None));
+    }
+
+    #[test]
+    fn a_hub_wiped_seconds_after_install_is_not_mistaken_for_never_installed() {
+        // THE CENTRAL TIMELINE, 2026-08-20, verbatim: install exit 0, task + binary present at
+        // t+5s and t+10s, both GONE by t+15s -- Sophos removed them before the hub ever answered a
+        // single request. With only `seen_working` to go on the monitor called that machine
+        // "Absent" and said nothing, which is the exact failure it exists to prevent.
+        let mut m = Monitor::new();
+        m.observe(&obs(false, false, false, false)); // before the install: genuinely no hub
+        m.observe(&obs(false, false, true, true)); // t+5s: installed, not yet serving
+        let (icon, alert) = m.observe(&obs(false, false, false, false)); // t+15s: wiped
+        assert_eq!(
+            icon,
+            Icon::Bad,
+            "a hub that existed and vanished is not 'never installed'"
+        );
+        assert_eq!(alert, Some(Alert::RemovedBySecuritySoftware));
+    }
+
+    #[test]
+    fn a_stopped_hub_that_is_then_quarantined_says_so() {
+        // Both facts matter and they arrive apart: first it stops, then its program file is taken.
+        // The icon is `Bad` throughout, so an icon-only rule would report "it stopped" and never
+        // mention the removal -- leaving the user restarting a service whose binary is gone.
+        let mut m = Monitor::new();
+        m.observe(&HEALTHY());
+        assert_eq!(
+            m.observe(&obs(false, false, true, true)).1,
+            Some(Alert::Stopped)
+        );
+        assert_eq!(
+            m.observe(&obs(false, false, false, true)).1,
+            Some(Alert::RemovedBySecuritySoftware),
+            "the escalation must be reported even though the icon never changed"
+        );
+        // ...and then it settles. Same reason, no repeat.
+        assert_eq!(m.observe(&obs(false, false, false, true)).1, None);
     }
 
     #[test]

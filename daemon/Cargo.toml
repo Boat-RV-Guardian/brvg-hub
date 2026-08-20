@@ -32,6 +32,13 @@ path = "src/lib.rs"
 name = "brvg-hub"
 path = "src/main.rs"
 
+# The notification-area monitor. A SEPARATE binary, not a mode of the daemon: it runs in the
+# logged-in user's session while the daemon runs as SYSTEM before anyone logs in, so they have
+# different lifetimes, different privileges, and must be able to die independently.
+[[bin]]
+name = "brvg-hub-tray"
+path = "src/bin/tray.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -40,7 +47,18 @@ axum = "0.8.4"
 url = "2"
 # rustls everywhere TLS is needed — no native TLS stack, matching the app's choice and for the
 # same reason: one vetted TLS story across every artifact we ship.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 uuid = { version = "1", features = ["v4"] }
+
+# Windows-only, so a Linux or macOS `cargo build` of the daemon pulls in no GUI stack at all. The
+# tray binary itself compiles everywhere — it is a stub off-Windows — which keeps `cargo build`
+# honest on the Linux CI leg instead of hiding the target from it.
+#
+# Versions are the ones the desktop app's own lockfile already builds with on this toolchain,
+# rather than whatever is newest: proven beats current for a component nobody here can compile.
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.24"
+tao = "0.35"
+notify-rust = "4.18"
