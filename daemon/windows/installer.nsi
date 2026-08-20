@@ -12,6 +12,7 @@
 ;   brvg-hub-setup.exe /S              -> install, auto-start ON  (the sane default for a boat)
 ;   brvg-hub-setup.exe /S /MANUAL      -> install, auto-start OFF (installed but not at boot)
 ;   brvg-hub-setup.exe /S /UNINSTALL   -> remove service, binary and config
+;   ... add /NOTRAY to any install to leave the notification-area monitor out
 ;
 ; EXIT CODES (the app branches on these, so do not renumber):
 ;   0  installed, and VERIFIED - the binary is on disk and the task is registered
@@ -47,6 +48,8 @@ Var Failures           ; accumulated self-check findings; non-empty ⇒ refuse t
 Var Dlg
 Var RbAuto
 Var RbManual
+Var ChkTray            ; the notification-area checkbox on the startup page
+Var Tray               ; "1" = install the tray monitor and start it with Windows
 
 !define MUI_ABORTWARNING
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfUninstalling
@@ -84,16 +87,33 @@ Function StartupPageCreate
   ${NSD_CreateLabel} 12u 76u 100% 10u "For testing. The hub reports nothing until someone starts it."
   Pop $0
 
+  ${NSD_CreateCheckbox} 0 96u 100% 12u "Show the hub in the notification area  (recommended)"
+  Pop $ChkTray
+  ${NSD_CreateLabel} 12u 109u 100% 18u "A small icon by the clock showing whether the hub is watching. It is also what tells you if security software removes the hub -- the installer cannot, because that happens after it finishes."
+  Pop $0
+
   ${NSD_Check} $RbAuto
+  ${If} $Tray == "1"
+    ${NSD_Check} $ChkTray
+  ${EndIf}
   nsDialogs::Show
 FunctionEnd
 
 Function StartupPageLeave
+  ${NSD_GetState} $ChkTray $0
+  ${If} $0 == ${BST_CHECKED}
+    StrCpy $Tray "1"
+  ${Else}
+    StrCpy $Tray "0"
+  ${EndIf}
   ${NSD_GetState} $RbManual $0
   ${If} $0 == ${BST_CHECKED}
     StrCpy $AutoStart "0"
   ${Else}
     StrCpy $AutoStart "1"
+  ; Default ON (owner, 2026-08-20). Its whole value is being present when something goes wrong,
+  ; and a monitor nobody opted into is a monitor nobody has.
+  StrCpy $Tray "1"
   ${EndIf}
 FunctionEnd
 
@@ -108,6 +128,11 @@ Function .onInit
 
   StrCpy $AutoStart "1"
   ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/NOTRAY" $R1
+  ${IfNot} ${Errors}
+    StrCpy $Tray "0"
+  ${EndIf}
   ClearErrors
   ${GetOptions} $R0 "/MANUAL" $R1
   ${IfNot} ${Errors}
@@ -222,6 +247,33 @@ Section "Hub" SecHub
     Abort "The hub was NOT installed.$\r$\n$Failures$\r$\n$\r$\nWHY THIS HAPPENS$\r$\nThe hub watches your boat or RV while nobody is aboard, so it has to start with the computer, before anyone signs in. Security software cannot tell that apart from a program trying to hide itself, so some products block it. Windows Defender allows it -- if you are seeing this, it is usually a third-party antivirus.$\r$\n$\r$\nHOW TO FIX IT$\r$\n1. Open your antivirus or endpoint protection.$\r$\n2. Find its quarantine, history, or recent events, and look for an item named brvg-hub or a blocked scheduled task.$\r$\n3. Choose Allow, Restore, or Trust for that item.$\r$\n4. Run this installer again.$\r$\n$\r$\nIf you would rather not allow it, the hub simply will not run on this computer. Nothing else about Boat & RV Guardian is affected -- the app still works, it just cannot monitor while you are away."
   ${EndIf}
 
+  ; ---- THE NOTIFICATION-AREA MONITOR -----------------------------------------------------------
+  ; Optional, default on (owner, 2026-08-20). It exists because THIS INSTALLER CANNOT REPORT ITS
+  ; OWN LATE FAILURES: measured on CENTRAL, a /S install returned 0, passed its self-check, and had
+  ; its binary and task removed by security software ~10s after the process exited. Something
+  ; resident is the only thing that can tell the user about that.
+  ${If} $Tray == "1"
+    SetOutPath "$INSTDIR\bin"
+    File "brvg-hub-tray.exe"
+
+    ; HKLM, not HKCU -- owner ruling: "for the taskbar, all users like the hub". Every account that
+    ; logs in gets the icon, which matches a hub that is machine-wide.
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BoatRVGuardianHubTray" '"$INSTDIR\bin\brvg-hub-tray.exe"'
+
+    ; Start it now rather than making the user log out to see it. VIA EXPLORER ON PURPOSE: this
+    ; installer is elevated, and a child of an elevated process is elevated too -- an elevated tray
+    ; icon behaves badly in a normal user's session (UIPI). explorer.exe runs as the logged-in user,
+    ; so handing it the path launches the monitor DE-ELEVATED, which is what it should be. If this
+    ; fails for any reason it is cosmetic: the Run key above starts it at the next sign-in anyway.
+    Exec '"$WINDIR\explorer.exe" "$INSTDIR\bin\brvg-hub-tray.exe"'
+  ${Else}
+    ; Declining on a re-install must actually REMOVE it, not just skip adding it.
+    DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BoatRVGuardianHubTray"
+    nsExec::ExecToLog 'taskkill /F /IM brvg-hub-tray.exe'
+    Pop $0
+    Delete "$INSTDIR\bin\brvg-hub-tray.exe"
+  ${EndIf}
+
   WriteUninstaller "$INSTDIR\uninstall-hub.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "DisplayName" "${HUB_NAME}"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "UninstallString" '"$INSTDIR\uninstall-hub.exe"'
@@ -244,6 +296,11 @@ Function RemoveEverything
   Pop $0
   ; /End only reaches a scheduler-owned process; anything else keeps the binary locked and RMDir
   ; would silently leave it behind.
+  ; The tray monitor rides along with the hub -- a leftover Run key pointing at a deleted file, or
+  ; a running monitor polling a hub that no longer exists, are both worse than nothing.
+  nsExec::ExecToLog 'taskkill /F /IM brvg-hub-tray.exe'
+  Pop $0
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BoatRVGuardianHubTray"
   nsExec::ExecToLog 'taskkill /F /IM brvg-hub.exe /T'
   Pop $0
   Sleep 1500
@@ -261,6 +318,11 @@ Section "Uninstall"
   Pop $0
   ; Same reason as RemoveEverything: a hub not owned by the scheduler holds bin\brvg-hub.exe open,
   ; and RMDir would quietly skip it, leaving a working hub behind after a "successful" uninstall.
+  ; The tray monitor rides along with the hub -- a leftover Run key pointing at a deleted file, or
+  ; a running monitor polling a hub that no longer exists, are both worse than nothing.
+  nsExec::ExecToLog 'taskkill /F /IM brvg-hub-tray.exe'
+  Pop $0
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BoatRVGuardianHubTray"
   nsExec::ExecToLog 'taskkill /F /IM brvg-hub.exe /T'
   Pop $0
   Sleep 1500
