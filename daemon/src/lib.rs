@@ -8,3 +8,9 @@ pub mod linktap;
 pub mod hub_relay;
 pub mod hub_server;
 pub mod tray_state;
+
+// The Windows service host. Windows-only: it links against the SCM (advapi32 via the
+// windows-service crate), which does not exist on macOS or the Linux CI leg. `main.rs` chooses
+// between this and a plain foreground run at startup.
+#[cfg(windows)]
+pub mod win_service;

@@ -945,6 +945,23 @@ fn now_ms() -> i64 {
 /// as a service there is no console, so failures also land in the heartbeat's absence — the
 /// connectivity sweep alerting on a quiet hub is the real monitor.
 pub fn run_headless() {
+    // A manual run stops on ctrl-c. A Windows service cannot: it has no console and no signal —
+    // the SCM tells it to stop, so the shutdown trigger has to come from OUTSIDE this function.
+    run_with_shutdown(async { let _ = tokio::signal::ctrl_c().await; });
+}
+
+/// The daemon proper, parameterised by whatever means "stop now" for the caller.
+///
+/// ⚠️ THE SHUTDOWN FUTURE IS THE WHOLE POINT OF THE SPLIT. A Windows service that ignores its
+/// stop control is not a service: the SCM waits out its timeout and then kills the process, which
+/// looks to everyone involved like a hang, and `sc stop` reports failure on a daemon that was
+/// working perfectly. `win_service.rs` passes a future that resolves when the SCM's control
+/// handler fires; `run_headless` passes ctrl-c. Nothing else about the runtime differs — one
+/// daemon, two ways of being told to stop.
+pub fn run_with_shutdown<F>(shutdown: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     let runtime = tokio::runtime::Runtime::new().expect("hub: tokio runtime");
     runtime.block_on(async {
         let base = hub_config::shared_base();
@@ -975,7 +992,9 @@ pub fn run_headless() {
                     eprintln!("hub: server exited: {e}");
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
+            // The caller's stop signal — ctrl-c for a manual run, the SCM's Stop/Shutdown control
+            // for a Windows service. Either way it ends the select and the daemon winds down.
+            _ = shutdown => {
                 eprintln!("hub: shutting down");
             }
         }
