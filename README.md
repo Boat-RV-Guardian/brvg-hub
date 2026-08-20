@@ -4,17 +4,26 @@ The on-site half of [Boat & RV Guardian](https://boatrvguardian.com): small coll
 the vessel or RV, gather local sensor and GPS telemetry on the LAN, and report it to the Guardian
 cloud in one batched roll-up per interval — alarms immediately, never batched.
 
-Two implementations of **one wire contract**:
+Implementations of **one wire contract**:
 
-| | `hub/` | `agent/` (hub-lite) |
-| --- | --- | --- |
-| Language | TypeScript (Node 18+, zero runtime deps) | POSIX shell + uhttpd CGI |
-| Hosts | Raspberry Pi, Docker, desktop | GL.iNet / OpenWrt-class routers (KBs footprint) |
-| Does | webhook receiver, roll-up aggregation, NMEA 0183 TCP GPS source, local growth path (control, local API/UI) | webhook receive-and-forward, roll-up, modem + GPS telemetry, immediate alarm passthrough |
+| | `daemon/` | `hub/` | `agent/` (hub-lite) |
+| --- | --- | --- | --- |
+| Language | Rust | TypeScript (Node 18+, zero runtime deps) | POSIX shell + uhttpd CGI |
+| Hosts | Windows / macOS, as a boot service | Raspberry Pi, Docker, desktop | GL.iNet / OpenWrt-class routers (KBs footprint) |
+| Does | webhook receiver, roll-up aggregation, LinkTap valve control, heartbeat; ships an installer and a tray monitor | webhook receiver, roll-up aggregation, NMEA 0183 TCP GPS source | webhook receive-and-forward, roll-up, modem + GPS telemetry, immediate alarm passthrough |
 
-A hub-lite is a **subset of a hub, never a variant**: both speak the same batch report format, and
-the shared fixtures in each side's tests are what keep them from drifting. If you change the
-contract in one place, a test goes red somewhere else — keep it that way.
+A hub-lite is a **subset of a hub, never a variant**: every side speaks the same batch report
+format, and the shared fixtures in each side's tests are what keep them from drifting. If you
+change the contract in one place, a test goes red somewhere else — keep it that way.
+
+> ⚠️ **`hub/` is FROZEN — no new capability (owner ruling 2026-08-19).** The project converged on
+> the Rust `daemon/` as the one full-hub implementation for every capable host. The TypeScript hub
+> keeps working as-is but stops growing; **new hub capability goes in `daemon/`.** `agent/` is
+> unaffected — it is the tier for constrained routers, not a duplicate. See `hub/README.md`.
+
+`daemon/` has no README of its own yet. It builds the `brvg-hub` service binary (installed as a
+Windows scheduled task or a macOS LaunchDaemon — see `daemon/windows/installer.nsi` and
+`daemon/macos/`) plus a `brvg-hub-tray` monitor, and releases through `.github/workflows/daemon-release.yml`.
 
 ## Architecture
 
@@ -47,7 +56,8 @@ with. To feed your own hardware's telemetry through a collector:
   (`/cgi-bin/report?device=<id>&event=<name>&<values>`) — events named `*.measurement` / `*.change`
   batch as telemetry; anything else is treated as an alarm and forwarded at once.
 
-See `hub/README.md` and `agent/README.md` for running each tier.
+See `hub/README.md` and `agent/README.md` for running those tiers; for the daemon, read
+`daemon/src/hub_server.rs` and its installer until it has a README.
 
 ## License
 

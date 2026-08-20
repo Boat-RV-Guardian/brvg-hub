@@ -30,7 +30,7 @@ const FILE_NAME: &str = "hub.json";
 pub const DEFAULT_HTTP_PORT: u16 = 8722;
 
 /// One member's LAN management credential, minted by the worker per (user, vehicle) —
-/// HUB-PROXY.md 2026-08-18 (late), "Management auth: per-user API keys". `role` uses the vehicle
+/// ONSITE.md "Management auth: per-user API keys" (2026-08-18 late). `role` uses the vehicle
 /// role vocabulary (`owner` | `coowner` | `admin` | `control` | `monitor`, mirroring
 /// vehicleCapabilities.ts) and is what hub_server gates writes on.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

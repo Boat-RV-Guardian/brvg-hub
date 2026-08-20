@@ -1,5 +1,5 @@
 #!/bin/sh
-# BRVG relay — CGI receiver (HUB-PROXY.md, relay tier). Installed at /www/brvg/cgi-bin/report and
+# BRVG relay — CGI receiver (ONSITE.md "The one wire contract", relay tier). Installed at /www/brvg/cgi-bin/report and
 # served by a dedicated uhttpd instance on the LAN. Pure POSIX shell: Lua is NOT stock firmware
 # (owner correction 2026-08-13), and the X750's 416 KB of free overlay rules out everything else.
 #

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build an OpenWrt .ipk of the phone-home agent.
 #
-# WHY this exists (ROUTER-PHONE-HOME.md): the app installs the agent over SSH today, which works
+# WHY this exists (ONSITE.md "Router phone-home"): the app installs the agent over SSH today, which works
 # but is desktop-only — the SSH client is deliberately kept out of the Android build. GL.iNet's 4.x
 # RPC surface has `plugins.install_package`, so a package installs with **no SSH at all**, from any
 # platform including a phone. It is also the natural home for the signed-artifact bar: opkg feeds

@@ -16,9 +16,9 @@
 // ── THE ONE CONTRACT ──────────────────────────────────────────────────────────────────────────
 // The app already speaks this protocol (dashboard/src/utils/linktapStatus.ts, linktapHttp.ts,
 // hooks/useLinkTapCommands.ts). This module is deliberately the SAME dialect, not a second one —
-// per HUB-PROXY.md's "a relay is a subset of a hub, never a variant of one". Where a value below
-// was measured on hardware, the measurement is recorded so nobody re-derives it wrongly; this
-// protocol has already cost two inverted unit bugs.
+// per ONSITE.md "The one wire contract" ("a hub-lite is a SUBSET of a hub, never a variant of
+// one"). Where a value below was measured on hardware, the measurement is recorded so nobody
+// re-derives it wrongly; this protocol has already cost two inverted unit bugs.
 
 export const GATEWAY_TIMEOUT_MS = 15_000;
 

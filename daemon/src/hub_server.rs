@@ -1,4 +1,4 @@
-// The hub SERVER — increment A of HUB-PROXY.md 2026-08-18 (late): "the hub is a SERVER; apps are
+// The hub SERVER — increment A of ONSITE.md "The hub is a SERVER" (2026-08-18 late): "the hub is a SERVER; apps are
 // clients; HTTP only". Owner framing, kept because it is the spec: "its a server, pretty much a
 // web server" · "the app is the remote… hub is on all the time" · "think homeassistant... does
 // not just listen on localhost."
@@ -303,7 +303,7 @@ struct TokenReq {
 }
 
 /// WHO is asking. On the LAN this comes from the presented key; over the relay it is VOUCHED FOR
-/// by the worker, which authenticated the user itself (HUB-PROXY.md 2026-08-18 late). Either way
+/// by the worker, which authenticated the user itself (ONSITE.md "Relay protocol", 2026-08-18 late). Either way
 /// the hub applies its OWN role gates to it — the worker deciding who someone is has never been
 /// the same as deciding what they may do.
 #[derive(Clone, Debug)]

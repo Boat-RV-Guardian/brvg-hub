@@ -113,7 +113,7 @@ parse_gpsd_tpv() {
 
 urlencode_spaces() { printf '%s' "$1" | sed 's/ /%20/g; s/&/%26/g'; }
 
-# --- Relay: spool → batch report (HUB-PROXY.md, relay tier) ------------------------------------
+# --- Relay: spool → batch report (ONSITE.md "The one wire contract", relay tier) ---------------
 # The CGI receiver (hub-lite-cgi.sh) appends webhook lines to a spool; these functions roll the spool
 # up into ONE batch POST. Wire contract: brvg-cloud-server/src/agentBatch.ts (v1); the canonical
 # fixture there is what agent/test.sh checks this output against.
@@ -987,7 +987,7 @@ push_modem() {
 }
 
 # --- LinkTap: local flood -> valve shutoff (hub-lite capability #1; owner 2026-08-19) -----------
-# The hub-only LinkTap model (HUB-PROXY.md 2026-08-19): the gateway lives on the LAN and this
+# The hub-only LinkTap model (ONSITE.md "LinkTap — hub-only, over local HTTP", 2026-08-19): the gateway lives on the LAN and this
 # router is its controller. When a flood alarm arrives at the relay's receiver, close every
 # configured valve over the gateway's local HTTP API BEFORE the cloud send — the close must not
 # wait on the WAN, and with the LinkTap cloud gone this is the only automated close path when the
