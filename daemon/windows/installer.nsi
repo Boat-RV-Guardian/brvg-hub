@@ -185,15 +185,38 @@ Section "Hub" SecHub
 
   DetailPrint "Registering the hub's background service..."
   ; ONSTART under SYSTEM: the boot-before-login shape. /F so a re-install repairs rather than fails.
-  nsExec::ExecToLog 'schtasks /Create /F /TN "${TASK_NAME}" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR "\"$INSTDIR\bin\brvg-hub.exe\""'
+  ;
+  ; ⚠️ /TR TAKES A BARE PATH. DO NOT WRAP IT IN QUOTES.
+  ; It reads like a command line and it is not: schtasks puts the value straight into the task's
+  ; <Command> element, which Task Scheduler treats as a literal filename. Quoting it produced
+  ;   <Command>"C:\ProgramData\BoatRVGuardian\bin\brvg-hub.exe"</Command>
+  ; and Windows then looked for a file whose name BEGINS with a quote character. Measured on
+  ; CENTRAL 2026-08-20: `schtasks /Run` -> "The parameter is incorrect", the COM API -> "Value does
+  ; not fall within the expected range", and the task never ran once. The same task created with a
+  ; bare path started the hub instantly. This path lives under ProgramData and has no spaces.
+  nsExec::ExecToLog 'schtasks /Create /F /TN "${TASK_NAME}" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $INSTDIR\bin\brvg-hub.exe'
   Pop $0
   ${If} $0 != 0
     DetailPrint "WARNING: could not register the service (schtasks exit $0)."
   ${EndIf}
 
-  ; Let every signed-in account SEE the service. See TASK_SDDL above.
-  nsExec::ExecToLog 'powershell -NoProfile -Command "$$s = New-Object -ComObject Schedule.Service; $$s.Connect(); $$s.GetFolder(\"\\\").GetTask(\"${TASK_NAME}\").SetSecurityDescriptor(\"${TASK_SDDL}\", 0)"'
+  ; Repair the settings schtasks imposes by default, then apply the SDDL. Both live in a .ps1
+  ; rather than inline here because the last inline PowerShell one-liner needed nine backslashes to
+  ; express one, and this one has to set six properties and re-register the task.
+  ;
+  ; What it fixes, all measured on CENTRAL 2026-08-20 and none of them anyone's decision:
+  ;   StopIfGoingOnBatteries=True   -- Windows STOPS the hub when the machine goes on battery.
+  ;                                    On a boat that is the moment shore power drops, which is
+  ;                                    precisely when the owner needs it watching.
+  ;   DisallowStartIfOnBatteries=True -- and it will not start there in the first place.
+  ;   ExecutionTimeLimit=PT72H      -- an "always-on" service killed every three days.
+  File "task-harden.ps1"
+  nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\bin\task-harden.ps1" -TaskName "${TASK_NAME}" -Sddl "${TASK_SDDL}"'
   Pop $0
+  ${If} $0 != 0
+    DetailPrint "WARNING: could not harden the service settings (exit $0)."
+  ${EndIf}
+  Delete "$INSTDIR\bin\task-harden.ps1"
 
   ${If} $AutoStart == "1"
     DetailPrint "The hub will start with this computer."
@@ -229,6 +252,22 @@ Section "Hub" SecHub
   Pop $0
   ${If} $0 != 0
     StrCpy $Failures "$Failures$\r$\n  - the background service was not registered"
+  ${EndIf}
+
+  ; AND THAT IT ACTUALLY STARTED. Existence is not running, and the difference is not academic:
+  ; on CENTRAL 2026-08-20 the binary was on disk and the task was registered and queryable -- this
+  ; check passed -- while the task could not launch anything at all, because its <Command> carried
+  ; literal quotes. The installer said "installed" about a hub that had never run and could not.
+  ;
+  ; Only when auto-start was chosen. "Install, but start it manually" means not running is correct.
+  ; Up to 15s: the daemon binds a socket and reads its config, and a slow disk should not fail an
+  ; install that is fine.
+  ${If} $AutoStart == "1"
+    nsExec::ExecToLog 'powershell -NoProfile -Command "for ($$i=0; $$i -lt 15; $$i++) { if (Get-Process brvg-hub -ErrorAction SilentlyContinue) { exit 0 }; Start-Sleep -Seconds 1 }; exit 1"'
+    Pop $0
+    ${If} $0 != 0
+      StrCpy $Failures "$Failures$\r$\n  - the hub was installed but did not start"
+    ${EndIf}
   ${EndIf}
 
   ${If} $Failures != ""
