@@ -114,6 +114,10 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y nsis
           cp target/release/brvg-hub windows/brvg-hub.exe
+          # The installer also embeds the tray monitor, so the gate needs a file at that name or
+          # makensis fails on a missing File. Same Linux-ELF-wearing-a-.exe trick as above: this
+          # proves the SCRIPT compiles, and the daemon-windows job proves the binary does.
+          cp target/release/brvg-hub-tray windows/brvg-hub-tray.exe
           makensis -WX -V2 windows/installer.nsi
           test -f windows/brvg-hub-windows-setup.exe
           echo "installer built: $(stat -c%s windows/brvg-hub-windows-setup.exe) bytes"

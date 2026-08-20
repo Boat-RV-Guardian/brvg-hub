@@ -73,6 +73,9 @@ jobs:
         run: |
           cargo build --release
           cp target/release/brvg-hub.exe "${{ matrix.artifact }}"
+          # The notification-area monitor rides in the installer rather than shipping as its own
+          # download: on its own it is useless, since it exists to watch a hub.
+          cp target/release/brvg-hub-tray.exe brvg-hub-tray-windows-x64.exe
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
@@ -126,6 +129,16 @@ jobs:
           path: daemon/${{ matrix.artifact }}
           if-no-files-found: error
 
+      # Windows only, and NOT published as a release asset -- the release job consumes it to build
+      # the installer. if-no-files-found: error so a build that silently stopped producing it fails
+      # here rather than producing an installer with no monitor in it.
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: brvg-hub-tray-windows-x64.exe
+          path: daemon/brvg-hub-tray-windows-x64.exe
+          if-no-files-found: error
+
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -160,6 +173,7 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y nsis
           cp brvg-hub-windows-x64.exe daemon/windows/brvg-hub.exe
+          cp brvg-hub-tray-windows-x64.exe daemon/windows/brvg-hub-tray.exe
           # -WX for the same reason as the ci.yml gate: NSIS recovers from an unknown $VARIABLE by
           # dropping it, so a warning here is a shipped installer that quietly targets the wrong
           # path. That is how daemon-v0.3.0 went out. Fail the release instead.
@@ -169,6 +183,10 @@ jobs:
 
       - name: Checksums
         run: |
+          # The tray binary is an INPUT to the installer, not a release asset -- publishing it
+          # would invite someone to download a monitor with no hub to monitor. Remove it before the
+          # glob sees it, or it lands in SHA256SUMS and in the release.
+          rm -f brvg-hub-tray-windows-x64.exe
           sha256sum brvg-hub-* > SHA256SUMS
           cat SHA256SUMS
       # BUILD-ONLY RUNS STOP HERE. Everything above has produced real artifacts — binaries, the macOS
