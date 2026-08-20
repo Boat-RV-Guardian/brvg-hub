@@ -364,8 +364,9 @@ read_nmea_device() {
 
 # NMEA over TCP — a chartplotter, AIS, gpsd, or a router serving NMEA on the LAN (GPS parity with
 # the hub's NMEA_HOST source; owner sprint 2026-08-17). The agent is always the CLIENT.
-# ⚠️ BENCH-VERIFY before shipping to customers: busybox `nc` on FACTORY-STOCK GL.iNet firmware
-# (the manual-Lua trap — the bench box has extra packages). Tracked in open-tasks 📡.
+# ⚠️ BENCH-VERIFY before shipping to customers: busybox `nc` on FACTORY-STOCK GL.iNet firmware.
+# The bench box has extra packages installed, so it proves nothing about a stock router — the same
+# trap that made hand-installed Lua look like a working dependency.
 read_gps_tcp() {
   [ -n "$GPS_HOST" ] || return 1
   command -v nc >/dev/null 2>&1 || { log "GPS_SOURCE=tcp needs nc (not found)"; return 1; }
