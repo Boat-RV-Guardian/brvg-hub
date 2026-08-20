@@ -186,14 +186,24 @@ Section "Hub" SecHub
   DetailPrint "Registering the hub's background service..."
   ; ONSTART under SYSTEM: the boot-before-login shape. /F so a re-install repairs rather than fails.
   ;
-  ; ⚠️ /TR TAKES A BARE PATH. DO NOT WRAP IT IN QUOTES.
-  ; It reads like a command line and it is not: schtasks puts the value straight into the task's
-  ; <Command> element, which Task Scheduler treats as a literal filename. Quoting it produced
+  ; Bare path, no quotes. This is a STYLE choice, not a correctness one -- do not build a rule on it.
+  ;
+  ; ⚠️ AN EARLIER VERSION OF THIS COMMENT CLAIMED, IN CAPITALS AND AS MEASURED FACT, that quoting
+  ; /TR made the task unrunnable. THAT WAS WRONG, and it shipped in daemon-v0.3.4. Retested on
+  ; CENTRAL 2026-08-20 by registering a task with a QUOTED path under a scratch name:
   ;   <Command>"C:\ProgramData\BoatRVGuardian\bin\brvg-hub.exe"</Command>
-  ; and Windows then looked for a file whose name BEGINS with a quote character. Measured on
-  ; CENTRAL 2026-08-20: `schtasks /Run` -> "The parameter is incorrect", the COM API -> "Value does
-  ; not fall within the expected range", and the task never ran once. The same task created with a
-  ; bare path started the hub instantly. This path lives under ProgramData and has no spaces.
+  ;   schtasks /Run -> exit 0, SUCCESS
+  ; A quoted <Command> runs. The app (hub_service.rs) has always produced one and its hub has always
+  ; started.
+  ;
+  ; What actually broke on CENTRAL was a corrupt TaskCache entry for the NAME BoatRVGuardianHub,
+  ; from repeated create/delete races while Sophos deleted files mid-operation. The proof was in
+  ; hand at the time and got ignored: a task with an UNQUOTED path under that same name ALSO failed,
+  ; while both quoted and unquoted tasks under other names ran fine, and the name recovered after a
+  ; logoff/logon. Machine damage, not a product defect.
+  ;
+  ; Kept because it is tidy and this path has no spaces. If a path with spaces ever needs quoting,
+  ; quote it -- nothing here says you cannot.
   nsExec::ExecToLog 'schtasks /Create /F /TN "${TASK_NAME}" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $INSTDIR\bin\brvg-hub.exe'
   Pop $0
   ${If} $0 != 0
