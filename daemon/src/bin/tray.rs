@@ -25,7 +25,7 @@ fn main() {
 
 #[cfg(windows)]
 mod windows_impl {
-    use brvg_hub::tray_state::{alert_text, Alert, Icon, Monitor, Observation};
+    use brvg_hub::tray_state::{alert_text, for_menu, Alert, Icon, Monitor, Observation};
     use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
     use std::process::Command;
@@ -194,7 +194,7 @@ mod windows_impl {
                 let (icon, alert) = monitor.observe(&obs);
                 let _ = tray.set_icon(Some(icon_for(icon)));
                 let _ = tray.set_tooltip(Some(tooltip(icon)));
-                m_status.set_text(tooltip(icon));
+                m_status.set_text(for_menu(tooltip(icon)));
                 m_start.set_enabled(icon != Icon::Ok && icon != Icon::NeedsSigning);
                 m_stop.set_enabled(icon == Icon::Ok || icon == Icon::NeedsSigning);
 
