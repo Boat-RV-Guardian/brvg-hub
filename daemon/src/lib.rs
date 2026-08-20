@@ -7,3 +7,4 @@ pub mod linktap_runtime;
 pub mod linktap;
 pub mod hub_relay;
 pub mod hub_server;
+pub mod tray_state;
