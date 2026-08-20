@@ -76,10 +76,19 @@ jobs:
       # Compile the Windows installer script on every push. It only SHIPS from a daemon-v* tag, so
       # without this its first compile would be inside a release — the worst place to discover a
       # typo. makensis cross-builds on Linux, so this costs seconds.
+      #
+      # -WX (WARNINGS ARE ERRORS) IS THE LOAD-BEARING FLAG HERE, not -V2.
+      # NSIS does not fail on an unknown $VARIABLE. It warns, DROPS the token, and produces a
+      # perfectly valid installer that silently does the wrong thing. daemon-v0.3.0 shipped exactly
+      # that: four `warning 6000: unknown variable/constant "PROGRAMDATA..."` lines sat in the green
+      # release log while the installer targeted \BoatRVGuardian instead of C:\ProgramData\... and
+      # its silent uninstall deleted nothing. This gate compiled it and passed, because compiling
+      # was all it checked. A warning NSIS can recover from is precisely the kind this project
+      # cannot afford, since nobody re-reads a green log.
       - name: Windows installer script compiles
         run: |
           sudo apt-get update -qq && sudo apt-get install -y nsis
           cp target/release/brvg-hub windows/brvg-hub.exe
-          makensis -V2 windows/installer.nsi
+          makensis -WX -V2 windows/installer.nsi
           test -f windows/brvg-hub-windows-setup.exe
           echo "installer built: $(stat -c%s windows/brvg-hub-windows-setup.exe) bytes"

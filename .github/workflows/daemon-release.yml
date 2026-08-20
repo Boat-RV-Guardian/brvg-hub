@@ -136,7 +136,10 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y nsis
           cp brvg-hub-windows-x64.exe daemon/windows/brvg-hub.exe
-          (cd daemon && makensis -V2 windows/installer.nsi)
+          # -WX for the same reason as the ci.yml gate: NSIS recovers from an unknown $VARIABLE by
+          # dropping it, so a warning here is a shipped installer that quietly targets the wrong
+          # path. That is how daemon-v0.3.0 went out. Fail the release instead.
+          (cd daemon && makensis -WX -V2 windows/installer.nsi)
           mv daemon/windows/brvg-hub-windows-setup.exe .
           echo "installer: $(stat -c%s brvg-hub-windows-setup.exe) bytes"
 

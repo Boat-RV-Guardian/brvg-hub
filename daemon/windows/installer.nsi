@@ -30,7 +30,9 @@ OutFile "brvg-hub-windows-setup.exe"
 ; The hub is a machine service: its binary and config live under ProgramData and its task runs as
 ; SYSTEM. There is no per-user variant to offer, so the installer simply requires admin.
 RequestExecutionLevel admin
-InstallDir "$PROGRAMDATA\BoatRVGuardian"
+; NO InstallDir HERE. $PROGRAMDATA IS NOT AN NSIS CONSTANT -- see .onInit, which sets $INSTDIR the
+; only way that actually works. Writing InstallDir "$PROGRAMDATA\BoatRVGuardian" compiles with a
+; warning, drops the unknown token, and silently installs to \BoatRVGuardian on the current drive.
 ShowInstDetails show
 SetCompressor /SOLID lzma
 
@@ -90,6 +92,13 @@ FunctionEnd
 
 ; Silent installs never see the page, so read the flags here and default to auto-start.
 Function .onInit
+  ; ProgramData, correctly. NSIS reaches it as $APPDATA under the "all users" shell context -- there
+  ; is no $PROGRAMDATA constant. The context is set once here and left set: this installer is
+  ; machine-wide by definition (RequestExecutionLevel admin, a SYSTEM task), so every shell folder
+  ; it touches should be the machine-wide one.
+  SetShellVarContext all
+  StrCpy $INSTDIR "$APPDATA\BoatRVGuardian"
+
   StrCpy $AutoStart "1"
   ${GetParameters} $R0
   ClearErrors
@@ -107,8 +116,40 @@ Function .onInit
 FunctionEnd
 
 Section "Hub" SecHub
+  ; UPGRADING OVER A RUNNING HUB IS THE NORMAL CASE, NOT THE EDGE CASE.
+  ; The app installs a hub at this same path under this same task name, and re-running this
+  ; installer is how a repair or an upgrade happens. A running hub holds bin\brvg-hub.exe open, so
+  ; File cannot overwrite it and the install fails at its very first instruction.
+  ;
+  ; Measured on CENTRAL, 2026-08-19, with the task in state Running:
+  ;   [System.IO.File]::OpenWrite("C:\ProgramData\BoatRVGuardian\bin\brvg-hub.exe")
+  ;   -> "The process cannot access the file ... because it is being used by another process."
+  DetailPrint "Stopping any hub that is already running..."
+  nsExec::ExecToLog 'schtasks /End /TN "${TASK_NAME}"'
+  Pop $0
+
+  ; /End only reaches a process the scheduler owns. A hub started by hand (brvg-hub --hub), or
+  ; orphaned when a task died badly, holds exactly the same lock and would still block the write.
+  ; So follow up unconditionally -- failure here is fine and expected when nothing is running.
+  nsExec::ExecToLog 'taskkill /F /IM brvg-hub.exe /T'
+  Pop $0
+
+  ; Windows releases the file handle when the process is reaped, which is not synchronous with
+  ; taskkill returning.
+  Sleep 1500
+
   SetOutPath "$INSTDIR\bin"
+  ; `try` so a still-locked binary sets the error flag instead of throwing NSIS's own abort/retry
+  ; dialog, which is unanswerable during a /S silent install driven by the app.
+  SetOverwrite try
   File "brvg-hub.exe"
+  IfErrors hub_locked hub_written
+  hub_locked:
+    DetailPrint "ERROR: the hub program file is still in use and could not be replaced."
+    SetErrorLevel 2
+    Abort "A hub is still running and its program file could not be replaced. Stop it and run this installer again."
+  hub_written:
+  SetOverwrite on
 
   DetailPrint "Registering the hub's background service..."
   ; ONSTART under SYSTEM: the boot-before-login shape. /F so a re-install repairs rather than fails.
@@ -143,13 +184,24 @@ SectionEnd
 ; the config holds a cloud credential, and leaving it behind with nothing able to clean it up is
 ; worse than removing it. Revoking that credential cloud-side is the app's job, separately.
 Function RemoveEverything
+  ; $APPDATA under the all-users context set in .onInit == C:\ProgramData. This function previously
+  ; used $PROGRAMDATA, which does not exist: every path below resolved to \BoatRVGuardian\... on the
+  ; current drive, so `/S /UNINSTALL` -- the path the APP drives -- reported success and deleted
+  ; NOTHING. hub.json holds a cloud credential, which makes that a leak rather than untidiness.
+  SetShellVarContext all
   nsExec::ExecToLog 'schtasks /End /TN "${TASK_NAME}"'
   Pop $0
   nsExec::ExecToLog 'schtasks /Delete /F /TN "${TASK_NAME}"'
   Pop $0
-  RMDir /r "$PROGRAMDATA\BoatRVGuardian\bin"
-  Delete "$PROGRAMDATA\BoatRVGuardian\hub.json"
-  Delete "$PROGRAMDATA\BoatRVGuardian\uninstall-hub.exe"
+  ; /End only reaches a scheduler-owned process; anything else keeps the binary locked and RMDir
+  ; would silently leave it behind.
+  nsExec::ExecToLog 'taskkill /F /IM brvg-hub.exe /T'
+  Pop $0
+  Sleep 1500
+  RMDir /r "$APPDATA\BoatRVGuardian\bin"
+  Delete "$APPDATA\BoatRVGuardian\hub.json"
+  Delete "$APPDATA\BoatRVGuardian\uninstall-hub.exe"
+  RMDir "$APPDATA\BoatRVGuardian"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub"
 FunctionEnd
 
@@ -158,6 +210,11 @@ Section "Uninstall"
   Pop $0
   nsExec::ExecToLog 'schtasks /Delete /F /TN "${TASK_NAME}"'
   Pop $0
+  ; Same reason as RemoveEverything: a hub not owned by the scheduler holds bin\brvg-hub.exe open,
+  ; and RMDir would quietly skip it, leaving a working hub behind after a "successful" uninstall.
+  nsExec::ExecToLog 'taskkill /F /IM brvg-hub.exe /T'
+  Pop $0
+  Sleep 1500
   RMDir /r "$INSTDIR\bin"
   Delete "$INSTDIR\hub.json"
   Delete "$INSTDIR\uninstall-hub.exe"
