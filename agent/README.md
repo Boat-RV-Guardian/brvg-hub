@@ -135,9 +135,10 @@ bench session (2026-08-06) plus standard NMEA/gpsd shapes. Runs in CI (`agent` j
 
 - Outbound HTTPS only; `WORKER_URL` must be https and defaults to the pinned first-party worker.
 - The config file holds the vehicle key → `chmod 600`, root-owned.
-- No inbound listener, no command execution, no self-update. Anything that installs or updates
-  code on customer devices carries the full signed-artifact bar (see ROUTER-PHONE-HOME.md) —
-  this skeleton is installed manually, by us, on bench/dev hardware.
+- No inbound listener, no command execution, no self-update. Anything that installs or updates code
+  on customer devices has to clear the full signed-artifact bar — a signed build, a checksum
+  verified against the same release that produced it, and a documented rollback — and none of that
+  exists here yet. This skeleton is installed manually, by us, on bench/dev hardware.
 
 
 ## Relay tier (X750-class routers) — roll up the Shellys' reports

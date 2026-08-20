@@ -36,8 +36,8 @@ canonical batch fixture.
     stationary heartbeats. The hub is always the client; nothing ever listens on the WAN.
 - Zero runtime dependencies (Node 18+ built-in `http`/`net` + global `fetch`).
 
-Not yet: on-hub provisioning / device configuration (the next increment; the open question in
-HUB-PROXY.md §4 is whether it starts read-only).
+Not yet: on-hub provisioning / device configuration. The open design question is whether it starts
+read-only.
 
 ## Run it
 
