@@ -27,7 +27,8 @@ Unicode true
 
 Name "${HUB_NAME}"
 ; TEMPORARY — throwaway branch proving -WX turns warning 6000 into a build failure.
-DetailPrint "$NOTAVARIABLE"
+; Same shape as the shipped bug: an undefined $VAR in a top-level path argument.
+InstallDir "$NOTAVARIABLE\BoatRVGuardian"
 OutFile "brvg-hub-windows-setup.exe"
 ; The hub is a machine service: its binary and config live under ProgramData and its task runs as
 ; SYSTEM. There is no per-user variant to offer, so the installer simply requires admin.
