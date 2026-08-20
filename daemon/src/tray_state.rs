@@ -81,6 +81,20 @@ pub fn alert_text(a: Alert) -> (&'static str, &'static str) {
     }
 }
 
+/// Escape a string for use as WINDOWS MENU text.
+///
+/// Windows menus treat `&` as the accelerator marker: it is swallowed and the next character gets
+/// underlined. Our product name contains one, so the tray menu rendered "Boat  RV Guardian hub"
+/// with a hole in it while the TOOLTIP — which has no mnemonics — showed it correctly. Caught in a
+/// screenshot from CENTRAL, 2026-08-20.
+///
+/// It lives HERE rather than in the tray binary for the reason that file states about itself: the
+/// Windows half only compiles in CI, so anything that can be tested should not live there. The bug
+/// was invisible to every existing test because the STRING was right — only the surface differed.
+pub fn for_menu(s: &str) -> String {
+    s.replace('&', "&&")
+}
+
 /// Tracks state across polls so alerts fire on CHANGE, not on condition.
 #[derive(Debug, Default)]
 pub struct Monitor {
@@ -347,6 +361,37 @@ mod tests {
         );
         // ...and then it settles. Same reason, no repeat.
         assert_eq!(m.observe(&obs(false, false, false, true)).1, None);
+    }
+
+    #[test]
+    fn menu_text_escapes_the_ampersand_in_our_own_product_name() {
+        // The exact string that rendered as "Boat  RV Guardian hub" in the tray menu on CENTRAL.
+        assert_eq!(
+            for_menu("Boat & RV Guardian hub — watching this vehicle"),
+            "Boat && RV Guardian hub — watching this vehicle"
+        );
+        // Every tooltip feeds the menu, so every one of them must survive the trip.
+        for i in [Icon::Ok, Icon::NeedsSigning, Icon::Bad, Icon::Absent] {
+            let raw = tooltip_for_test(i);
+            let escaped = for_menu(raw);
+            assert_eq!(
+                escaped.matches("&&").count(),
+                raw.matches('&').count(),
+                "every & in {raw:?} must be doubled for the menu"
+            );
+            assert!(!escaped.contains("&&&"), "no over-escaping in {escaped:?}");
+        }
+    }
+
+    /// Mirrors the shell's tooltip strings. Duplicated deliberately: the real ones live in the
+    /// Windows-only binary, and a test that cannot run is not a test.
+    fn tooltip_for_test(i: Icon) -> &'static str {
+        match i {
+            Icon::Ok => "Boat & RV Guardian hub — watching this vehicle",
+            Icon::NeedsSigning => "Boat & RV Guardian hub — running, but not signed to a vehicle",
+            Icon::Bad => "Boat & RV Guardian hub — NOT running. This vehicle is not being watched.",
+            Icon::Absent => "Boat & RV Guardian hub — not installed on this computer",
+        }
     }
 
     #[test]
