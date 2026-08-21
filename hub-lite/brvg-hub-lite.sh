@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous hub-lite is kept and automatically restored
 # if the new one cannot even report its own version.
 
-HUB_LITE_VERSION="0.14.1"
+HUB_LITE_VERSION="0.14.3"
 HUB_LITE_BACKUP="/etc/brvg-hub-lite.prev"
 
 # The LAST telemetry this hub-lite composed, as JSON, for the LAN management door to serve
@@ -34,6 +34,16 @@ HUB_LITE_BACKUP="/etc/brvg-hub-lite.prev"
 # disagree — and read rather than re-collected, so a status call never touches the AT port while
 # the main loop is mid-read. tmpfs: it is a cache of something the cloud already has.
 HUB_LITE_STATE="${BRVG_HUB_LITE_STATE:-/tmp/brvg-hub-lite.state}"
+
+# The LAN management door runs verbs in a CGI process, NOT in this daemon. Anything a verb does to
+# the filesystem, uci or the modem therefore lands for real — but FOLLOWUP_REPORT is a shell
+# variable, and setting it in a process that immediately exits does nothing at all.
+#
+# ⚠️ THAT IS NOT THEORETICAL: on the bench (2026-08-21) `?action=command&cmd=report_now` returned
+# 200 "ran" and the reported timestamp did not move for four minutes, because the whole effect of
+# that verb IS the follow-up. So the CGI touches this file instead, and the loop below consumes it.
+# One tick of latency, and honest — as against instant and false.
+HUB_LITE_FOLLOWUP="${BRVG_HUB_LITE_FOLLOWUP:-/tmp/brvg-hub-lite.followup}"
 
 
 # --- Pure parsers (stdin → stdout; empty output = no data) -------------------------------------
@@ -551,6 +561,10 @@ state_pairs() {
   printf '%s' "$2" | tr '&' '\n' | awk -F= '
     $1 != "" && $2 != "" {
       gsub(/%20/, " ", $2); gsub(/"/, "", $2); gsub(/\\/, "", $2)
+      # `av` is already in the object header. Emitting it again produced a DUPLICATE JSON KEY in
+      # the real bench capture — legal-ish, last-one-wins in most parsers, and exactly the kind of
+      # sloppiness that bites when a stricter parser meets it.
+      if ($1 == "av") next
       printf "%s\"%s\":\"%s\"", (n++ ? "," : ""), $1, $2
     }'
 }
@@ -1464,6 +1478,12 @@ main() {
       [ "${HUB_LITE_ENABLED:-0}" = "1" ] && drain_relay
       watch_hub
       _elapsed=0
+    fi
+    # A verb the LAN door ran in its own process asked for a follow-up report (see
+    # HUB_LITE_FOLLOWUP above). Consumed here, where FOLLOWUP_REPORT actually means something.
+    if [ -f "$HUB_LITE_FOLLOWUP" ]; then
+      rm -f "$HUB_LITE_FOLLOWUP"
+      FOLLOWUP_REPORT=1
     fi
     # A command ran during the sends above. Its effect is NOT in the report that carried it — that
     # payload was built first — so report again before sleeping. Cleared before sending, so a
