@@ -618,3 +618,49 @@ check "ledger: an unseen valve starts at its own first run" "12.50" "$out"
 
 check "ledger: day keys are UTC ISO dates" "$(date -u +%F)" "$(lt_day_key)"
 rm -rf "$_LD"
+
+# --- LAN management door: valid_mac (hub-lite-mgmt.sh POST ?action=lockdown) ---
+# This is what replaces "the app SSHes a generated uci script in as root", so the interesting
+# cases are the ones that must NOT reach a uci argument.
+check "mac: a plain lowercase address" "0" "$(valid_mac 'aa:bb:cc:dd:ee:ff'; echo $?)"
+check "mac: uppercase is equally valid" "0" "$(valid_mac 'AA:BB:CC:DD:EE:FF'; echo $?)"
+check "mac: mixed case, digits" "0" "$(valid_mac '3C:1e:04:AB:90:7f'; echo $?)"
+check "mac: empty string rejected" "1" "$(valid_mac ''; echo $?)"
+check "mac: too short rejected" "1" "$(valid_mac 'aa:bb:cc:dd:ee'; echo $?)"
+check "mac: too long rejected" "1" "$(valid_mac 'aa:bb:cc:dd:ee:ff:00'; echo $?)"
+check "mac: hyphen form rejected (uci wants colons)" "1" "$(valid_mac 'aa-bb-cc-dd-ee-ff'; echo $?)"
+check "mac: non-hex rejected" "1" "$(valid_mac 'zz:bb:cc:dd:ee:ff'; echo $?)"
+check "mac: a command substitution is not a MAC" "1" "$(valid_mac 'aa:bb:cc:dd:ee:ff; reboot'; echo $?)"
+check "mac: a semicolon anywhere is fatal" "1" "$(valid_mac ';reboot'; echo $?)"
+check "mac: whitespace rejected" "1" "$(valid_mac 'aa:bb:cc:dd:ee:f '; echo $?)"
+
+# --- LAN management door: state_pairs ---
+# The CGI serves this verbatim as JSON, so the encoding has to survive the app's parser
+# (parseCachedModem) and must never emit an unescaped quote.
+out=$(state_pairs "modem.measurement" "up=1&mode=LTE&rsrp=-104&carrier=T-Mobile")
+check "state: a plain report becomes quoted pairs" '"up":"1","mode":"LTE","rsrp":"-104","carrier":"T-Mobile"' "$out"
+
+out=$(state_pairs "modem.measurement" "carrier=T%20Mobile%20US")
+check "state: %20 comes back as a space, as the worker decodes it" '"carrier":"T Mobile US"' "$out"
+
+out=$(state_pairs "modem.measurement" "up=1&empty=&=novalue&mode=LTE")
+check "state: half-pairs are dropped rather than emitted broken" '"up":"1","mode":"LTE"' "$out"
+
+out=$(state_pairs "modem.measurement" 'carrier=A"B\C')
+check "state: quotes and backslashes are stripped, never emitted raw" '"carrier":"ABC"' "$out"
+
+out=$(state_pairs "modem.measurement" "")
+check "state: an empty report emits nothing at all" "" "$out"
+
+# write_state must produce ONE parseable object, and must not leave its temp file behind.
+_SD=$(mktemp -d)
+HUB_LITE_STATE="$_SD/state"
+write_state "modem.measurement" "up=1&rsrp=-104"
+out=$(cat "$HUB_LITE_STATE")
+case "$out" in
+  '{"v":1,"event":"modem.measurement","ts":'*',"av":"'*'","up":"1","rsrp":"-104"}') r=ok ;;
+  *) r="$out" ;;
+esac
+check "write_state: one object, version + timestamp + the reported values" "ok" "$r"
+check "write_state: no temp file left behind" "1" "$(ls "$_SD" | wc -l | tr -d ' ')"
+rm -rf "$_SD"
