@@ -1,0 +1,3 @@
+# The Home Assistant test harness. Pinned loosely on purpose: this package tracks HA releases, and
+# pinning it hard means the component is tested against an HA nobody runs any more.
+pytest-homeassistant-custom-component

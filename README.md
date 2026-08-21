@@ -1,8 +1,13 @@
-# Boat & RV Guardian — on-site collectors
+# Boat & RV Guardian — on-site collectors, and the Home Assistant integration
 
 The on-site half of [Boat & RV Guardian](https://boatrvguardian.com): small collectors that run on
 the vessel or RV, gather local sensor and GPS telemetry on the LAN, and report it to the Guardian
 cloud in one batched roll-up per interval — alarms immediately, never batched.
+
+It also carries the **[Home Assistant integration](custom_components/boatrvguardian/)**, which is the
+other side of the same coin: the collectors send telemetry UP to the cloud, and the integration lets a
+Home Assistant at your house read it back DOWN. That one is cloud-only by design — it watches a
+vessel that is somewhere else, so it never touches the vessel's own network.
 
 Implementations of **one wire contract**:
 
