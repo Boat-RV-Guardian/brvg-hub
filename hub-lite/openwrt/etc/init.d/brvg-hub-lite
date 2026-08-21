@@ -14,11 +14,22 @@ start_service() {
     procd_set_param stderr 1            # hub-lite logs go to logread
     procd_close_instance
 
-    # Relay tier (HUB-PROXY.md): a dedicated uhttpd serves the CGI webhook receiver. Only when the
-    # config asks for it AND uhttpd exists — the hub-lite itself must keep working without either.
+    # A dedicated uhttpd serves BOTH CGIs on the vessel LAN:
+    #   /cgi-bin/report — the relay tier's webhook receiver (HUB-PROXY.md)
+    #   /cgi-bin/mgmt   — the management door (hub-lite 0.14.0)
+    #
+    # ⚠️ NOT GATED ON HUB_LITE_ENABLED any more (2026-08-21). That flag turns on the RELAY TIER, and
+    # tying the listener to it meant a hub-lite that merely reported telemetry had no management
+    # door at all — so the app fell back to driving the router VENDOR's API, which is the thing the
+    # door exists to replace. The two CGIs are independently deny-by-default (the receiver does
+    # nothing until webhooks are pointed at it; the management door answers 401 until the box has
+    # collected its key), so serving them costs a listener and nothing else.
+    #
+    # Still conditional on uhttpd and /www/brvg EXISTING: uhttpd is not stock GL.iNet firmware
+    # (bench X750), and the hub-lite itself must keep working without either.
     # shellcheck disable=SC1091
     [ -f /etc/brvg-hub-lite.conf ] && . /etc/brvg-hub-lite.conf
-    if [ "${HUB_LITE_ENABLED:-0}" = "1" ] && [ -x /usr/sbin/uhttpd ] && [ -d /www/brvg ]; then
+    if [ -x /usr/sbin/uhttpd ] && [ -d /www/brvg ]; then
         procd_open_instance hub_lite
         procd_set_param command /usr/sbin/uhttpd -f -h /www/brvg -x /cgi-bin -p "0.0.0.0:${RECEIVER_PORT:-8181}"
         procd_set_param respawn 3600 30 0

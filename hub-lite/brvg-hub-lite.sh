@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous hub-lite is kept and automatically restored
 # if the new one cannot even report its own version.
 
-HUB_LITE_VERSION="0.14.0"
+HUB_LITE_VERSION="0.14.1"
 HUB_LITE_BACKUP="/etc/brvg-hub-lite.prev"
 
 # The LAST telemetry this hub-lite composed, as JSON, for the LAN management door to serve
@@ -1458,8 +1458,9 @@ main() {
     if [ "$_elapsed" -ge "$MODEM_INTERVAL" ]; then
       push_modem
       # No-op once we have a key. Here rather than at startup so a box that boots with no WAN still
-      # collects one the moment the uplink comes back.
-      [ "${HUB_LITE_ENABLED:-0}" = "1" ] && fetch_mgmt_key
+      # collects one the moment the uplink comes back. NOT gated on HUB_LITE_ENABLED: that flag is
+      # the RELAY TIER, and the management door is not part of it.
+      fetch_mgmt_key
       [ "${HUB_LITE_ENABLED:-0}" = "1" ] && drain_relay
       watch_hub
       _elapsed=0
