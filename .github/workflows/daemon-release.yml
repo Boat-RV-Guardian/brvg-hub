@@ -95,6 +95,12 @@ jobs:
             target/aarch64-apple-darwin/release/brvg-hub \
             target/x86_64-apple-darwin/release/brvg-hub
           lipo -archs "${{ matrix.artifact }}"
+          # The menu-bar monitor, universal too — one build serves both the owner's Intel Macs and
+          # CI's Apple Silicon. It rides inside the pkg, not as its own download: on its own it is
+          # useless, since it exists to watch a hub.
+          lipo -create -output brvg-hub-tray \
+            target/aarch64-apple-darwin/release/brvg-hub-tray \
+            target/x86_64-apple-darwin/release/brvg-hub-tray
 
       - name: Build the macOS installer pkg
         if: runner.os == 'macOS'
@@ -106,10 +112,15 @@ jobs:
         run: |
           VER="${{ steps.ver.outputs.ver }}"
           ROOT=pkgroot
-          mkdir -p "$ROOT/Library/Application Support/BoatRVGuardian/bin" "$ROOT/Library/LaunchDaemons" scripts
+          mkdir -p "$ROOT/Library/Application Support/BoatRVGuardian/bin" "$ROOT/Library/LaunchDaemons" "$ROOT/Library/LaunchAgents" scripts
           cp "${{ matrix.artifact }}" "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub"
           chmod 755 "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub"
+          # The tray binary sits beside the daemon; 755 so the logged-in user (the agent runs as
+          # them, not root) can execute it.
+          cp brvg-hub-tray "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub-tray"
+          chmod 755 "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub-tray"
           cp macos/com.sc4tech.brvg-hub.plist "$ROOT/Library/LaunchDaemons/"
+          cp macos/com.sc4tech.brvg-hub-tray.plist "$ROOT/Library/LaunchAgents/"
           cp macos/postinstall scripts/
           pkgbuild --root "$ROOT" --scripts scripts \
             --identifier com.sc4tech.brvg-hub --version "$VER" \
