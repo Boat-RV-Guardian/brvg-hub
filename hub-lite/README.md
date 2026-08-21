@@ -188,6 +188,14 @@ answer now.
 | `POST ?action=command&cmd=<verb>` | ONE allowlisted verb, run now — the cloud verb set exactly |
 | `POST ?action=lockdown&catch=0\|1` | Apply, with the per-MAC allow list the cloud verb cannot carry |
 
+The door is **not part of the relay tier**: `HUB_LITE_ENABLED` turns the webhook receiver on, and
+since 0.14.1 the uhttpd instance and the management-key fetch run regardless of it. Tying the
+listener to that flag meant a hub-lite that merely reported telemetry had no door at all, so the app
+fell back to driving the router VENDOR's API — the thing the door exists to replace. Both CGIs are
+independently deny-by-default, so serving them costs a listener and nothing else. What the door
+still needs is `uhttpd` present (**not stock** on GL.iNet firmware — the `.ipk` carries it as a
+`Depends:`).
+
 **Auth** is the router's own management key (`MGMT_KEY` in the config), presented as `x-brvg-key`.
 The hub-lite fetches it from `/api/agent/mgmt-key` with the device token it already has, so a box
 enrolled before 0.14.0 picks its key up on the next modem tick with nothing to re-install. With no
