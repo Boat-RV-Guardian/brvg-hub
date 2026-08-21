@@ -1,6 +1,6 @@
 //! `brvg-hub-tray` — the hub's presence in the notification area.
 //!
-//! The hub is a SYSTEM scheduled task with no window, which means the honest answer to "is my boat
+//! The hub is a SYSTEM Windows service with no window, which means the honest answer to "is my boat
 //! being watched right now?" has been "open the app and find out". This gives it an answer at a
 //! glance, and — the reason it exists — it is still running when the hub is taken away.
 //!
@@ -9,9 +9,9 @@
 //! start/stop. Keep it that way — the Windows half only compiles in CI, so logic that lives here
 //! is logic nobody can test.
 
-// Windows-only by nature: it draws in the Windows notification area and drives schtasks. The stub
-// keeps `cargo build` honest on Linux and macOS (CI builds the daemon on Linux) instead of making
-// the whole crate Windows-only.
+// Windows-only by nature: it draws in the Windows notification area and drives the SCM (`sc`). The
+// stub keeps `cargo build` honest on Linux and macOS (CI builds the daemon on Linux) instead of
+// making the whole crate Windows-only.
 #[cfg(not(windows))]
 fn main() {
     eprintln!("brvg-hub-tray is Windows-only; the hub daemon itself is not.");
@@ -25,7 +25,9 @@ fn main() {
 
 #[cfg(windows)]
 mod windows_impl {
-    use brvg_hub::tray_state::{alert_text, for_menu, Alert, Icon, Monitor, Observation};
+    use brvg_hub::tray_state::{
+        alert_text, for_menu, paint_status_dot, status_rgb, Alert, Icon, Monitor, Observation,
+    };
     use std::os::windows::process::CommandExt;
     use std::path::PathBuf;
     use std::process::Command;
@@ -40,7 +42,10 @@ mod windows_impl {
     /// asked the user for a port number would be a worse product than one that occasionally says
     /// "not answering" on an unusual setup.
     const PORT: u16 = 8722;
-    const TASK_NAME: &str = "BoatRVGuardianHub";
+    /// The Windows service name — MUST match the daemon's `win_service.rs` SERVICE_NAME and the
+    /// app's hub_service.rs SERVICE_NAME. Same string across all three; a mismatch means the tray
+    /// reports on, and starts/stops, a service nobody else is managing.
+    const SERVICE_NAME: &str = "BoatRVGuardianHub";
     /// 15s: frequent enough that a removal is noticed while the user is still near the machine,
     /// cheap enough to be free — it is a loopback request to a process on the same box.
     const POLL: Duration = Duration::from_secs(15);
@@ -61,7 +66,7 @@ mod windows_impl {
             answering,
             registered,
             binary_present: hub_dir().join("bin").join("brvg-hub.exe").exists(),
-            task_present: task_registered(),
+            service_present: service_registered(),
         }
     }
 
@@ -89,35 +94,64 @@ mod windows_impl {
         }
     }
 
-    fn task_registered() -> bool {
-        Command::new("schtasks")
-            .args(["/Query", "/TN", TASK_NAME])
+    /// `sc query <name>` succeeds iff the service exists — unelevated, allowed for authenticated
+    /// users under the SCM default (same reason the app's status poll needs no elevation).
+    fn service_registered() -> bool {
+        Command::new("sc.exe")
+            .args(["query", SERVICE_NAME])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
     }
 
-    /// Start/stop need admin because the task runs as SYSTEM. Owner ruling 2026-08-20: acceptable,
-    /// because installing the hub already prompts. One UAC per action, never a standing elevation.
-    fn run_elevated(inner: &str) {
-        let script = format!("Start-Process -FilePath schtasks -ArgumentList '{inner}' -Verb RunAs -WindowStyle Hidden");
+    /// Start/stop need admin because the service runs as LocalSystem. Owner ruling 2026-08-20:
+    /// acceptable, because installing the hub already prompts. One UAC per action, never a standing
+    /// elevation. `sc start`/`sc stop` are idempotent enough for a menu — a redundant click just
+    /// returns a benign non-zero the tray ignores; the next 15s poll shows the true state either way.
+    fn run_elevated(verb: &str) {
+        let script = format!(
+            "Start-Process -FilePath sc.exe -ArgumentList '{verb}','{SERVICE_NAME}' -Verb RunAs -WindowStyle Hidden"
+        );
         let _ = Command::new("powershell")
             .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
 
-    /// A flat RGBA square. Deliberately not an .ico asset: four solid colours read correctly at
-    /// 16px, need no designer, and cannot go missing from the installer's file list.
+    /// The BRVG brand mark, embedded from the app's own 32×32 icon, with a coloured STATUS DOT in
+    /// the corner (owner ruling 2026-08-20: "make the icon the BRVG shield"). The dot keeps the
+    /// at-a-glance status the flat square used to carry — a tray icon on a boat has to answer
+    /// "watching / not watching" without a click — while the mark makes it recognisably ours.
+    const ICON_PNG: &[u8] = include_bytes!("../../assets/tray-icon.png");
+
     fn icon_for(state: Icon) -> tray_icon::Icon {
+        // The brand mark is the intent, but the tray must never fail to show SOMETHING — and this
+        // render path cannot be tested off-Windows — so a decode failure falls back to the old flat
+        // status square rather than leaving the notification area blank.
+        brand_icon(state).unwrap_or_else(|| flat_icon(state))
+    }
+
+    /// Decode the embedded PNG and paint the status dot. Returns `None` on anything unexpected
+    /// (bad decode, or not the 8-bit RGBA we shipped), so the caller can fall back.
+    fn brand_icon(state: Icon) -> Option<tray_icon::Icon> {
+        let mut reader = png::Decoder::new(ICON_PNG).read_info().ok()?;
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).ok()?;
+        if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+            return None;
+        }
+        let (w, h) = (info.width, info.height);
+        buf.truncate((w * h * 4) as usize);
+        paint_status_dot(&mut buf, w, h, state); // pure + host-tested in tray_state
+        tray_icon::Icon::from_rgba(buf, w, h).ok()
+    }
+
+    /// The pre-2026-08-20 fallback: a flat status-coloured square. Four solid colours read
+    /// correctly at 16px and need nothing on disk, which is exactly why it is the safety net.
+    fn flat_icon(state: Icon) -> tray_icon::Icon {
         const N: u32 = 32;
-        let (r, g, b) = match state {
-            Icon::Ok => (0x22, 0xA5, 0x5A),           // green — watching
-            Icon::NeedsSigning => (0xE0, 0x9B, 0x20), // amber — running, not signed to a vehicle
-            Icon::Bad => (0xC8, 0x32, 0x32),          // red — should be running and is not
-            Icon::Absent => (0x8A, 0x8A, 0x8A),       // grey — no hub here
-        };
+        let (r, g, b) = status_rgb(state);
         let mut rgba = Vec::with_capacity((N * N * 4) as usize);
         for _ in 0..N * N {
             rgba.extend_from_slice(&[r, g, b, 0xFF]);
@@ -215,9 +249,9 @@ mod windows_impl {
                 if ev.id == m_quit.id() {
                     *control_flow = ControlFlow::Exit;
                 } else if ev.id == m_start.id() {
-                    run_elevated(&format!("/Run /TN {TASK_NAME}"));
+                    run_elevated("start");
                 } else if ev.id == m_stop.id() {
-                    run_elevated(&format!("/End /TN {TASK_NAME}"));
+                    run_elevated("stop");
                 }
             }
             while tray_rx.try_recv().is_ok() {} // drained so the queue cannot grow unbounded

@@ -29,8 +29,10 @@ pub struct Observation {
     pub registered: bool,
     /// `%ProgramData%\BoatRVGuardian\bin\brvg-hub.exe` exists.
     pub binary_present: bool,
-    /// The `BoatRVGuardianHub` scheduled task is registered.
-    pub task_present: bool,
+    /// The `BoatRVGuardianHub` Windows service is registered (`sc query` succeeds). Named
+    /// `service_present` since the 2026-08-20 conversion from a scheduled task — the field means
+    /// "the persistence entry exists", and the quarantine signature below reads the same either way.
+    pub service_present: bool,
 }
 
 /// What the icon should say at a glance.
@@ -50,8 +52,10 @@ pub enum Icon {
 /// talks on every poll gets muted, and then it is worth nothing on the night it matters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alert {
-    /// The task is still registered but the program file is gone. That combination does not
-    /// happen by accident — an uninstall removes both. It is the quarantine signature we measured.
+    /// The service is still registered but the program file is gone. That combination does not
+    /// happen by accident — an uninstall removes both. It is the quarantine signature we measured
+    /// (on the scheduled task; the service is expected to be flagged far less, but the detection
+    /// costs nothing and defends against any AV that still does).
     RemovedBySecuritySoftware,
     /// The program is there and simply is not running: crashed, stopped, or never started.
     Stopped,
@@ -95,6 +99,54 @@ pub fn for_menu(s: &str) -> String {
     s.replace('&', "&&")
 }
 
+/// The status colour for the tray icon's badge, as RGB. Presentation, but deterministic, so it
+/// lives here with a test rather than in the Windows-only binary.
+pub fn status_rgb(state: Icon) -> (u8, u8, u8) {
+    match state {
+        Icon::Ok => (0x22, 0xA5, 0x5A),           // green — watching
+        Icon::NeedsSigning => (0xE0, 0x9B, 0x20), // amber — running, not signed to a vehicle
+        Icon::Bad => (0xC8, 0x32, 0x32),          // red — should be running and is not
+        Icon::Absent => (0x8A, 0x8A, 0x8A),       // grey — no hub here
+    }
+}
+
+/// Paint a filled STATUS DOT into a `w×h` RGBA8 buffer (the decoded BRVG brand mark), lower-right,
+/// with a 1px dark ring for contrast against a light logo. A solid dot reads at the 16px the tray
+/// renders at, where a thin frame around the mark would vanish.
+///
+/// PURE and tested on host on purpose: the tray binary only compiles in CI, so the pixel maths —
+/// the one part that can be wrong in a way no reviewer will spot — is verified here where every
+/// platform runs it. `rgba` shorter than `w*h*4` is left untouched past its end rather than
+/// panicking; the shell only ever passes a correctly sized buffer.
+pub fn paint_status_dot(rgba: &mut [u8], w: u32, h: u32, state: Icon) {
+    let (r, g, b) = status_rgb(state);
+    let cx = w as f32 * 0.72;
+    let cy = h as f32 * 0.72;
+    let rad = w.min(h) as f32 * 0.26;
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            if i + 3 >= rgba.len() {
+                continue;
+            }
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let d = (dx * dx + dy * dy).sqrt();
+            if d <= rad {
+                rgba[i] = r;
+                rgba[i + 1] = g;
+                rgba[i + 2] = b;
+                rgba[i + 3] = 0xFF;
+            } else if d <= rad + 1.2 {
+                rgba[i] = 0x12;
+                rgba[i + 1] = 0x16;
+                rgba[i + 2] = 0x1A;
+                rgba[i + 3] = 0xFF;
+            }
+        }
+    }
+}
+
 /// Tracks state across polls so alerts fire on CHANGE, not on condition.
 #[derive(Debug, Default)]
 pub struct Monitor {
@@ -122,7 +174,7 @@ impl Monitor {
 
     /// Fold one observation in. Returns the icon to show and, at most, one alert to raise.
     pub fn observe(&mut self, o: &Observation) -> (Icon, Option<Alert>) {
-        if o.task_present || o.binary_present {
+        if o.service_present || o.binary_present {
             self.seen_installed = true;
         }
         let icon = self.classify(o);
@@ -172,7 +224,7 @@ impl Monitor {
         }
         // Not answering. Is a hub supposed to exist here at all? `seen_installed` is what stops a
         // hub wiped seconds after install from reading as "this machine never had one".
-        if o.task_present || o.binary_present || self.seen_working || self.seen_installed {
+        if o.service_present || o.binary_present || self.seen_working || self.seen_installed {
             Icon::Bad
         } else {
             Icon::Absent
@@ -182,8 +234,8 @@ impl Monitor {
     /// The reason a bad state is bad, for the alert text. Separate from `classify` because the
     /// icon only has to say "something is wrong" while the message has to be actionable.
     pub fn diagnose(o: &Observation) -> Alert {
-        // Task registered, program file gone. An uninstall takes both; a crash takes neither.
-        if o.task_present && !o.binary_present {
+        // Service registered, program file gone. An uninstall takes both; a crash takes neither.
+        if o.service_present && !o.binary_present {
             Alert::RemovedBySecuritySoftware
         } else if !o.binary_present {
             // Everything gone, and `seen_working` got us here, so it was present before.
@@ -198,12 +250,12 @@ impl Monitor {
 mod tests {
     use super::*;
 
-    fn obs(answering: bool, registered: bool, binary: bool, task: bool) -> Observation {
+    fn obs(answering: bool, registered: bool, binary: bool, service: bool) -> Observation {
         Observation {
             answering,
             registered,
             binary_present: binary,
-            task_present: task,
+            service_present: service,
         }
     }
     const HEALTHY: fn() -> Observation = || obs(true, true, true, true);
@@ -279,10 +331,11 @@ mod tests {
     }
 
     #[test]
-    fn task_registered_but_binary_gone_is_the_quarantine_signature() {
-        // MEASURED on CENTRAL: Sophos blocked the schtasks call and quarantined the binary, and in
-        // a later run let the install finish and removed the file afterwards. An UNINSTALL removes
-        // both; a crash removes neither. Only security software leaves this exact pair.
+    fn service_registered_but_binary_gone_is_the_quarantine_signature() {
+        // MEASURED on CENTRAL (schtasks era): Sophos blocked the call and quarantined the binary,
+        // and in a later run let the install finish and removed the file afterwards. An UNINSTALL
+        // removes both; a crash removes neither. Only security software leaves this exact pair —
+        // and it reads identically whether the persistence entry is a task or a service.
         assert_eq!(
             Monitor::diagnose(&obs(false, false, false, true)),
             Alert::RemovedBySecuritySoftware
@@ -361,6 +414,35 @@ mod tests {
         );
         // ...and then it settles. Same reason, no repeat.
         assert_eq!(m.observe(&obs(false, false, false, true)).1, None);
+    }
+
+    #[test]
+    fn the_status_dot_paints_the_center_and_leaves_the_far_corner_alone() {
+        // A 32×32 buffer, pre-filled with an opaque sentinel so we can see what the dot changed.
+        let (w, h) = (32u32, 32u32);
+        let mut buf = vec![0x77u8; (w * h * 4) as usize];
+        paint_status_dot(&mut buf, w, h, Icon::Ok);
+        let (r, g, b) = status_rgb(Icon::Ok);
+        // The dot centre (~0.72 across) is the status colour, fully opaque.
+        let ci = (((h as f32 * 0.72) as u32 * w + (w as f32 * 0.72) as u32) * 4) as usize;
+        assert_eq!(&buf[ci..ci + 4], &[r, g, b, 0xFF], "dot centre must be the status colour");
+        // The top-left corner is nowhere near the lower-right dot — untouched sentinel.
+        assert_eq!(&buf[0..4], &[0x77, 0x77, 0x77, 0x77], "far corner must be left alone");
+    }
+
+    #[test]
+    fn the_status_dot_color_differs_per_state_so_the_glance_still_works() {
+        // The whole point of keeping a dot on the brand mark: OK and Bad must not look the same.
+        assert_ne!(status_rgb(Icon::Ok), status_rgb(Icon::Bad));
+        assert_ne!(status_rgb(Icon::Ok), status_rgb(Icon::NeedsSigning));
+        assert_ne!(status_rgb(Icon::Bad), status_rgb(Icon::Absent));
+    }
+
+    #[test]
+    fn paint_status_dot_never_reads_past_a_short_buffer() {
+        // Robustness: a mis-sized buffer must not panic the tray. Give it too small a slice.
+        let mut tiny = vec![0u8; 10];
+        paint_status_dot(&mut tiny, 32, 32, Icon::Bad); // must simply do nothing dangerous
     }
 
     #[test]
