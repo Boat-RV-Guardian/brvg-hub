@@ -3,28 +3,28 @@
 # (owner direction 2026-08-07: "a small box that can act as a hub and run the same proxy/polling
 # that the GL.iNet could run… Z-Wave and Bluetooth capabilities").
 #
-# It installs the SAME agent the routers run — one codebase, two homes — plus the optional radio
+# It installs the SAME hub-lite the routers run — one codebase, two homes — plus the optional radio
 # bits the router can't provide. Deliberately idempotent: re-running it upgrades in place.
 #
-#   sudo sh agent/hub/install.sh
+#   sudo sh hub-lite/hub/install.sh
 #
-# What it does NOT do: write /etc/brvg-agent.conf. That file carries this device's token and is
+# What it does NOT do: write /etc/brvg-hub-lite.conf. That file carries this device's token and is
 # written by the app at enrollment (or by hand from the panel's manual steps).
 
 set -eu
 
-BIN=/usr/local/bin/brvg-agent
-UNIT=/etc/systemd/system/brvg-agent.service
+BIN=/usr/local/bin/brvg-hub-lite
+UNIT=/etc/systemd/system/brvg-hub-lite.service
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 
 [ "$(id -u)" = "0" ] || { echo "run me with sudo" >&2; exit 1; }
 
-echo "==> agent"
-install -m 0755 "$SRC/brvg-agent.sh" "$BIN"
-install -m 0644 "$SRC/systemd/brvg-agent.service" "$UNIT"
+echo "==> hub-lite"
+install -m 0755 "$SRC/brvg-hub-lite.sh" "$BIN"
+install -m 0644 "$SRC/systemd/brvg-hub-lite.service" "$UNIT"
 
 echo "==> dependencies"
-# gpsd covers a USB GPS receiver; the agent falls back to reading the NMEA device directly.
+# gpsd covers a USB GPS receiver; the hub-lite falls back to reading the NMEA device directly.
 # bluez is preinstalled on Raspberry Pi OS; named here so a bare Debian image works too.
 if command -v apt-get >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
@@ -45,15 +45,15 @@ fi
 
 echo "==> service"
 systemctl daemon-reload
-systemctl enable brvg-agent >/dev/null 2>&1 || true
-if [ -f /etc/brvg-agent.conf ]; then
-  chmod 600 /etc/brvg-agent.conf
-  systemctl restart brvg-agent
+systemctl enable brvg-hub-lite >/dev/null 2>&1 || true
+if [ -f /etc/brvg-hub-lite.conf ]; then
+  chmod 600 /etc/brvg-hub-lite.conf
+  systemctl restart brvg-hub-lite
   echo "    started"
 else
-  echo "    NOT started — /etc/brvg-agent.conf is missing."
+  echo "    NOT started — /etc/brvg-hub-lite.conf is missing."
   echo "    Enroll this hub from the app (Router / Connectivity → Connect to cloud), or copy a"
-  echo "    configuration to /etc/brvg-agent.conf and run: systemctl start brvg-agent"
+  echo "    configuration to /etc/brvg-hub-lite.conf and run: systemctl start brvg-hub-lite"
 fi
 
 echo "==> done"

@@ -14,11 +14,11 @@
 #     Only if that send fails is the alarm spooled, so the next drain retries it — never both.
 #   * telemetry is appended to the spool and rides the next roll-up.
 #
-# The spool line format is the relay's internal contract with brvg-agent.sh:
+# The spool line format is the relay's internal contract with brvg-hub-lite.sh:
 #   <epoch>\t<device>\t<event>\t<raw-urlencoded-params>
 # Appends of one short line to tmpfs are effectively atomic (< PIPE_BUF); there is no locking.
 
-CONF="${BRVG_AGENT_CONF:-/etc/brvg-agent.conf}"
+CONF="${BRVG_HUB_LITE_CONF:-/etc/brvg-hub-lite.conf}"
 SPOOL="${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
 
 # A sleepy flood sensor is awake on borrowed battery — answer first, work after.
@@ -60,20 +60,20 @@ if [ "$urgent" = "1" ] && [ -f "$CONF" ]; then
   # LOCAL FLOOD -> VALVE SHUTOFF, before the cloud send (hub-lite capability #1, owner
   # 2026-08-19): the close must not wait on the WAN — with the LinkTap cloud gone this is the
   # only automated close when the uplink is down. Deliberately independent of DEVICE_TOKEN:
-  # closing a valve on the LAN needs no cloud credential. One-shot sourcing of the agent, same
+  # closing a valve on the LAN needs no cloud credential. One-shot sourcing of the hub-lite, same
   # pattern as spool_to_items below, so the classifier and the close live in ONE place.
   if [ -n "${LINKTAP_HOST:-}" ]; then
     LINKTAP_HOST="$LINKTAP_HOST" LINKTAP_GW_ID="${LINKTAP_GW_ID:-}" LINKTAP_DEV_IDS="${LINKTAP_DEV_IDS:-}" \
-    BRVG_RELAY_SPOOL="$SPOOL" BRVG_AGENT_TEST=1 \
-      sh -c ". \"${BRVG_AGENT_BIN:-/usr/bin/brvg-agent}\"; is_flood_shutoff \"$event\" && linktap_flood_close" 2>/dev/null || true
+    BRVG_RELAY_SPOOL="$SPOOL" BRVG_HUB_LITE_TEST=1 \
+      sh -c ". \"${BRVG_HUB_LITE_BIN:-/usr/bin/brvg-hub-lite}\"; is_flood_shutoff \"$event\" && linktap_flood_close" 2>/dev/null || true
   fi
   if [ -n "${DEVICE_TOKEN:-}" ] && [ -n "${VID:-}" ] && [ -n "${DEVICE_ID:-}" ]; then
     # Single-item batch, NO seq: this path never retries (failure falls through to the spool,
     # which has its own seq), so idempotency isn't needed and must not be claimed.
-    # ONE decoder: reuse the agent's own spool→items builder rather than carrying a copy of the
-    # urldecode/escape awk here. Sourcing with BRVG_AGENT_TEST=1 defines functions only — no loop.
+    # ONE decoder: reuse the hub-lite's own spool→items builder rather than carrying a copy of the
+    # urldecode/escape awk here. Sourcing with BRVG_HUB_LITE_TEST=1 defines functions only — no loop.
     _items=$(printf '0\t%s\t%s\t%s\n' "$device" "$event" "$rest" \
-      | BRVG_AGENT_TEST=1 sh -c ". \"${BRVG_AGENT_BIN:-/usr/bin/brvg-agent}\"; spool_to_items" 2>/dev/null)
+      | BRVG_HUB_LITE_TEST=1 sh -c ". \"${BRVG_HUB_LITE_BIN:-/usr/bin/brvg-hub-lite}\"; spool_to_items" 2>/dev/null)
     case "$_items" in "["*"]") : ;; *) _items="" ;; esac
     _body='{"v":1,"kind":"delta","items":'${_items:-[]}',"ok":[]}'
     if [ -n "$_items" ] && curl -fsS --max-time 10 -X POST \

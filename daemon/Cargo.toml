@@ -9,7 +9,7 @@
 # boat does — and consumes this crate as a pinned git dependency only so its transitional `--hub`
 # launch path keeps working until the standalone installers ship.
 #
-# Third sibling in this repo, one wire contract: agent/ is hub-lite (POSIX shell, for the router),
+# Third sibling in this repo, one wire contract: hub-lite/ is the hub-lite tier (POSIX shell, for the router),
 # hub/ is the TypeScript hub (containers), and this is the Windows/macOS daemon. They share the
 # contract and its fixtures, not source — see the repo README.
 [package]

@@ -1,5 +1,5 @@
 // The batch wire contract (v1) — the TypeScript hub's half of the SAME format the shell hub-lite and
-// the worker speak (brvg-cloud-server/src/agentBatch.ts, agent/brvg-agent.sh). The canonical
+// the worker speak (brvg-cloud-server/src/agentBatch.ts, hub-lite/brvg-hub-lite.sh). The canonical
 // fixture in test/contract.test.ts is copied byte-for-byte from the worker's agentBatch.test.ts:
 // if any tier changes shape, a test goes red somewhere. A hub-lite is a subset of a hub, never a
 // variant — this file must never emit a field the worker's parser would reject.

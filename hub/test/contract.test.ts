@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildReport, buildUrgent, HUB_TIER } from '../src/contract.js';
 
-// The SAME canonical v1 fixture the worker (agentBatch.test.ts) and the shell agent (agent/test.sh)
+// The SAME canonical v1 fixture the worker (agentBatch.test.ts) and the shell hub-lite (hub-lite/test.sh)
 // check against — copied, not paraphrased. Cross-tier drift shows up as a red test somewhere.
 const CANONICAL_SHAPE = {
   v: 1, seq: 42, boot: 'boot-a', kind: 'delta',

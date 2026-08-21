@@ -3,7 +3,7 @@
 // install free of an npm tree.
 //
 // Phase B: the reply can carry queued commands ({commands:[{id,cmd}]}), and `ackIds` ride the
-// request as &ack= — the same piggyback contract the shell agent speaks (worker agentCommands.ts).
+// request as &ack= — the same piggyback contract the shell hub-lite speaks (worker agentCommands.ts).
 
 import type { BatchReport } from './contract.js';
 import type { HubConfig } from './config.js';

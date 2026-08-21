@@ -36,7 +36,7 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
   // Phase B command channel: every delivery may return queued commands; acks ride the NEXT
   // request out. A command is executed once (its id joins pendingAcks immediately, so the worker
   // re-sending it until acked cannot re-run it). The hub's verb set is tiny — report_now drains
-  // at once; anything else is acknowledged and DROPPED, same rule as the shell agent: an unknown
+  // at once; anything else is acknowledged and DROPPED, same rule as the shell hub-lite: an unknown
   // verb must never become code execution.
   let pendingAcks: string[] = [];
   let drainSoon: ReturnType<typeof setTimeout> | null = null;
@@ -160,7 +160,7 @@ export function startHub(config: HubConfig, send: Sender, log: (m: string) => vo
   server.listen(config.port, () => log(`hub listening on :${config.port}, draining every ${config.drainIntervalSec}s`));
 
   // GPS sources, both opt-in, both spooling gps.measurement under the HUB's own device id —
-  // exactly how the shell agent reports its router's GNSS.
+  // exactly how the shell hub-lite reports its router's GNSS.
   const spoolFix = (fix: { lat: number; lon: number; acc?: number }) =>
     agg.add({ device: config.deviceId, event: 'gps.measurement', params: fixToParams(fix) });
 

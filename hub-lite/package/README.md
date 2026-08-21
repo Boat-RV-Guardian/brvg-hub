@@ -1,12 +1,12 @@
-# Agent package (.ipk) — the SSH-free install path
+# Hub-lite package (.ipk) — the SSH-free install path
 
-`sh agent/package/build-ipk.sh` produces `dist/brvg-agent_<version>_all.ipk`. The agent is POSIX
+`sh hub-lite/package/build-ipk.sh` produces `dist/brvg-hub-lite_<version>_all.ipk`. The hub-lite is POSIX
 shell, so the package is architecture-independent (`all`) and needs no OpenWrt SDK or
 cross-compiler — "building" is packaging.
 
 ## Why this exists
 
-The app installs the agent **over SSH** today (`install_router_agent`). That works and needs no
+The app installs the hub-lite **over SSH** today (`install_router_agent`). That works and needs no
 infrastructure, but it is **desktop-only**: the SSH client is deliberately kept out of the Android
 build. GL.iNet's 4.x RPC surface exposes `plugins.install_package`, so a package can be installed
 **with no SSH at all, from any platform including a phone**.
@@ -16,9 +16,9 @@ signature is verified **on-device by the package manager**, rather than by somet
 
 ## What the package does and doesn't do
 
-- Installs `/usr/bin/brvg-agent` and `/etc/init.d/brvg-agent`, and **enables** the service.
-- Deliberately does **not** start it: without a configuration the agent exits with a fatal error,
-  so the app starts it after writing `/etc/brvg-agent.conf`.
+- Installs `/usr/bin/brvg-hub-lite` and `/etc/init.d/brvg-hub-lite`, and **enables** the service.
+- Deliberately does **not** start it: without a configuration the hub-lite exits with a fatal error,
+  so the app starts it after writing `/etc/brvg-hub-lite.conf`.
 - Deliberately ships **no config file**. That file holds the device's token; packaging a
   placeholder would risk overwriting a live credential on upgrade. It is listed in `conffiles` so
   opkg preserves an existing one.
@@ -35,22 +35,22 @@ signature is verified **on-device by the package manager**, rather than by somet
 Until then the SSH path remains the shipped install, and this package is built and verified in CI
 so it cannot rot before it is needed.
 
-## Updating an installed agent — the signed path
+## Updating an installed hub-lite — the signed path
 
-`sh agent/package/build-feed.sh` builds the `Packages` index over `dist/*.ipk` and **signs it**.
+`sh hub-lite/package/build-feed.sh` builds the `Packages` index over `dist/*.ipk` and **signs it**.
 It **refuses to emit an unsigned feed** unless you pass `ALLOW_UNSIGNED=1`, because an unsigned
 feed is not a weaker signed feed — it is a remote-code-execution channel with the lock off, and it
 fails silently (opkg installs from it happily if signature checking was never turned on).
 
 ```sh
-sh agent/package/build-ipk.sh                       # version comes from AGENT_VERSION in the agent
-USIGN_KEY=~/keys/brvg-feed.key sh agent/package/build-feed.sh
+sh hub-lite/package/build-ipk.sh                       # version comes from HUB_LITE_VERSION in the hub-lite
+USIGN_KEY=~/keys/brvg-feed.key sh hub-lite/package/build-feed.sh
 ```
 
 Generate the key pair once, and keep the SECRET half off CI and out of the repo:
 
 ```sh
-usign -G -s brvg-feed.key -p brvg-feed.pub -c "Boat & RV Guardian agent feed"
+usign -G -s brvg-feed.key -p brvg-feed.pub -c "Boat & RV Guardian hub-lite feed"
 ```
 
 ### The chain of trust
@@ -60,7 +60,7 @@ Packages.sig  →  Packages (signed index)  →  SHA256Sum per .ipk  →  the .i
 ```
 
 Verification happens **on the router**, by opkg, against a public key in `/etc/opkg/keys/` — not by
-the agent, and not by anything we wrote.
+the hub-lite, and not by anything we wrote.
 
 ### Why the cloud cannot choose what gets installed
 
@@ -72,7 +72,7 @@ into a code-execution channel.
 
 ### Rollback
 
-Before upgrading, the agent copies itself to `/etc/brvg-agent.prev`. If the newly installed agent
+Before upgrading, the hub-lite copies itself to `/etc/brvg-hub-lite.prev`. If the newly installed hub-lite
 cannot even print its own version, the old one is restored automatically. `rollback_agent` does the
 same thing on demand. On a boat behind CGNAT there is no remote undo, so the undo has to be local.
 

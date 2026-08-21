@@ -1,4 +1,4 @@
-# BRVG phone-home agent configuration. Copy to /etc/brvg-agent.conf and chmod 600 — the vehicle
+# BRVG phone-home hub-lite configuration. Copy to /etc/brvg-hub-lite.conf and chmod 600 — the vehicle
 # key authenticates telemetry writes for this vehicle and must not be world-readable.
 
 # The vehicle this device reports into (Settings → the vehicle's id) and this device's id in it.
@@ -26,7 +26,7 @@ MODEM_INTERVAL=600
 # (poll a Cradlepoint NCOS router's local HTTP API — the router is never configured to push).
 GPS_SOURCE=auto
 
-# For GPS_SOURCE=tcp: the LAN NMEA server to dial (the agent is always the client).
+# For GPS_SOURCE=tcp: the LAN NMEA server to dial (the hub-lite is always the client).
 GPS_HOST=""
 GPS_PORT=10110
 
@@ -38,7 +38,7 @@ CRADLEPOINT_USER=admin
 CRADLEPOINT_PASSWORD=""
 
 # Modem AT port. GL-X750: /dev/ttyUSB2. X3000-class (PCIe RM520): check `ls /dev/mhi_*` — see
-# agent/README.md. Leave as-is on a Pi with no cellular HAT (modem telemetry is skipped).
+# hub-lite/README.md. Leave as-is on a Pi with no cellular HAT (modem telemetry is skipped).
 AT_PORT=/dev/ttyUSB2
 
 # Raw NMEA serial device for GPS_SOURCE=nmea (e.g. a u-blox USB dongle: /dev/ttyACM0).
@@ -46,7 +46,7 @@ GPS_DEVICE=""
 
 # --- Relay (X750-class routers — HUB-PROXY.md relay tier) ---------------------------------------
 # When enabled, a small LAN-only web listener (uhttpd) receives the Shellys' webhooks locally and
-# this agent rolls them up into ONE cloud report per interval — the metered link pays per TLS
+# this hub-lite rolls them up into ONE cloud report per interval — the metered link pays per TLS
 # handshake, not per byte, so fewer connections is the whole saving. Alarms are never held: the
 # receiver sends them to the cloud immediately, on their own.
 HUB_LITE_ENABLED=0

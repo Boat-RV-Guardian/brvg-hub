@@ -1,5 +1,5 @@
 // Hub configuration — read from the environment (12-factor; Docker- and systemd-friendly). Mirrors
-// the shell agent's /etc/brvg-agent.conf names where they overlap, so the app's enrollment config
+// the shell hub-lite's /etc/brvg-hub-lite.conf names where they overlap, so the app's enrollment config
 // can drive either tier.
 
 export interface HubConfig {
@@ -20,7 +20,7 @@ export interface HubConfig {
   cradlepointPort: number;
   cradlepointUser: string;
   cradlepointPassword: string;
-  /** GPS poll / stationary report cadence, seconds — mirrors the shell agent's GPS_INTERVAL. */
+  /** GPS poll / stationary report cadence, seconds — mirrors the shell hub-lite's GPS_INTERVAL. */
   gpsIntervalSec: number;
   /** LinkTap gateway on the LAN (hub-only model, owner 2026-08-19). Empty host = feature off. */
   linktapHost: string;
@@ -68,7 +68,7 @@ export function loadConfig(env: Record<string, string | undefined>): HubConfig {
     cradlepointPort: num(env.CRADLEPOINT_PORT, 80, 1),
     cradlepointUser: (env.CRADLEPOINT_USER || 'admin').trim(),
     cradlepointPassword: env.CRADLEPOINT_PASSWORD || '',
-    gpsIntervalSec: num(env.GPS_INTERVAL, 120, 30), // same name, default and floor as the agent
+    gpsIntervalSec: num(env.GPS_INTERVAL, 120, 30), // same name, default and floor as the hub-lite
     linktapHost: (env.LINKTAP_HOST || '').trim(),
     linktapGwId: (env.LINKTAP_GW_ID || '').trim(),
     linktapDevIds: (env.LINKTAP_DEV_IDS || '').split(',').map((v) => v.trim().slice(0, 16)).filter(Boolean),
