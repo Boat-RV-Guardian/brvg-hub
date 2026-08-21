@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The tray's LaunchAgent: the macOS twin of the Windows Run-key entry. A LaunchAgent (not a
+     Daemon) because the menu bar belongs to a logged-in GUI session, so this runs AS THE USER in
+     their Aqua session — never as root. Installed by the pkg to /Library/LaunchAgents, which launchd
+     loads into every user's GUI session at login automatically; the postinstall also bootstraps it
+     into the session already open so it appears without a re-login.
+
+     RunAtLoad shows it at login; KeepAlive brings it back if it is quit or crashes. LimitLoadTo
+     SessionType Aqua keeps it out of non-GUI sessions (ssh, the login window) where a menu-bar app
+     has nothing to draw on. No StandardErrorPath: an agent runs as the user and cannot write the
+     root-owned Application Support dir, and the tray's own stderr breadcrumb is a convenience, not a
+     contract. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.sc4tech.brvg-hub-tray</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/BoatRVGuardian/bin/brvg-hub-tray</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+</dict>
+</plist>

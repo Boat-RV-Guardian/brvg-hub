@@ -22,4 +22,19 @@ if ! launchctl print system/com.sc4tech.brvg-hub >/dev/null 2>&1; then
   exit 1
 fi
 
+# The TRAY AGENT — best-effort, and deliberately NOT fatal. The daemon is the product; the tray is
+# a convenience, and a menu-bar icon that failed to appear must never fail the whole install the way
+# a dead daemon does. The agent lives in /Library/LaunchAgents, so launchd loads it into every GUI
+# session at the NEXT login on its own — this block only makes it appear in the session already open.
+#
+# It has to be bootstrapped into that user's GUI domain, not the system domain: a menu-bar app draws
+# in an Aqua session and runs as the user. `/dev/console` is owned by whoever is logged in at the
+# screen; if that is root or the login window (nobody logged in), there is no session to target and
+# we simply skip — RunAtLoad covers the next login.
+CONSOLE_UID=$(stat -f %u /dev/console 2>/dev/null || echo 0)
+if [ "$CONSOLE_UID" -gt 0 ]; then
+  launchctl bootout "gui/$CONSOLE_UID/com.sc4tech.brvg-hub-tray" 2>/dev/null || true
+  launchctl bootstrap "gui/$CONSOLE_UID" /Library/LaunchAgents/com.sc4tech.brvg-hub-tray.plist 2>/dev/null || true
+fi
+
 exit 0
