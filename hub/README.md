@@ -2,7 +2,7 @@
 > daemon (`../daemon`) as the one full-hub implementation for every capable host — desktop and
 > containers alike. This TypeScript hub keeps working as-is but stops growing: new capability goes
 > in the daemon, and this implementation's LinkTap client and cycle machine are the porting source
-> (with their fixtures) for the daemon's LinkTap work. `agent/` (hub-lite) is unaffected — it is a
+> (with their fixtures) for the daemon's LinkTap work. `hub-lite/` (hub-lite) is unaffected — it is a
 > tier for constrained routers, not a duplicate.
 
 # BRVG hub (TypeScript) — Pi / Docker / desktop
@@ -11,7 +11,7 @@ The **hub tier** of the on-site architecture of Boat & RV Guardian. It receives 
 Shellys' webhooks on the LAN and rolls them up into ONE `/api/agent/batch` report per interval —
 the same wire contract the shell hub-lite on a GL.iNet speaks, and the same the worker validates.
 
-**Why TypeScript, and why a hub rather than the router agent** (owner, 2026-08-13): a capable box
+**Why TypeScript, and why a hub rather than the router hub-lite** (owner, 2026-08-13): a capable box
 (a Pi, a Docker host, the desktop app) can host far more than the 416 KB of writable flash on a
 GL-X750 allows. The hub is the growth path — aggregation today, provisioning and configuration
 next — and living in TypeScript means it can share the app's existing Shelly code instead of a
@@ -58,7 +58,7 @@ Config is environment variables (enroll the hub in the app to mint `DEVICE_TOKEN
 | `CRADLEPOINT_PORT` | | `80` |
 | `CRADLEPOINT_USER` | | `admin` |
 | `CRADLEPOINT_PASSWORD` | | — |
-| `GPS_INTERVAL` | | `120` (floor 30) — poll / stationary-report cadence, same name as the agent's |
+| `GPS_INTERVAL` | | `120` (floor 30) — poll / stationary-report cadence, same name as the hub-lite's |
 
 **Docker** (multi-arch via buildx — amd64 / arm64 / armv7):
 

@@ -119,7 +119,7 @@ export function createReportGovernor(heartbeatMs: number): ReportGovernor {
   };
 }
 
-/** `gps.measurement` params in the shell agent's exact shape: lat/lon at %.5f (≈1 m), acc whole m. */
+/** `gps.measurement` params in the shell hub-lite's exact shape: lat/lon at %.5f (≈1 m), acc whole m. */
 export function fixToParams(fix: GpsFix): Record<string, string> {
   const params: Record<string, string> = { lat: fix.lat.toFixed(5), lon: fix.lon.toFixed(5) };
   if (fix.acc != null) params.acc = String(Math.round(fix.acc));

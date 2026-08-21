@@ -1,5 +1,5 @@
 # CI for both collector tiers. The steps are carried over from the app repo's ci.yml so nothing
-# regresses in the move — the agent job's pinned shellcheck and the ar-less .ipk build both exist
+# regresses in the move — the hub-lite job's pinned shellcheck and the ar-less .ipk build both exist
 # because of failures documented there.
 name: ci
 on:
@@ -24,14 +24,14 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
-  # hub-lite (agent/): POSIX-sh parser tests with hardware-captured fixtures, plus shellcheck at
+  # hub-lite (hub-lite/): POSIX-sh parser tests with hardware-captured fixtures, plus shellcheck at
   # error severity. dash (ubuntu's sh) doubles as a busybox-ash POSIX check.
-  agent:
+  hub-lite:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Agent parser tests
-        run: sh agent/test.sh
+      - name: Hub-lite parser tests
+        run: sh hub-lite/test.sh
       - name: Install shellcheck
         env:
           SC_VERSION: v0.11.0
@@ -48,17 +48,17 @@ jobs:
         # runs as root on a customer's machine. It was omitted while it lived only in the daemon
         # tree — the same blind spot that let a broken NSIS script ship: a thing that is built but
         # never checked.
-        run: shellcheck --severity=error --shell=sh agent/brvg-agent.sh agent/setup-usb-gps.sh agent/test.sh agent/package/build-ipk.sh agent/package/build-feed.sh agent/hub/install.sh daemon/macos/postinstall
-      - name: Build agent package
-        run: sh agent/package/build-ipk.sh
+        run: shellcheck --severity=error --shell=sh hub-lite/brvg-hub-lite.sh hub-lite/setup-usb-gps.sh hub-lite/test.sh hub-lite/package/build-ipk.sh hub-lite/package/build-feed.sh hub-lite/hub/install.sh daemon/macos/postinstall
+      - name: Build hub-lite package
+        run: sh hub-lite/package/build-ipk.sh
       # The feed index is the signed artifact: prove the index describes the package just built,
       # and that the builder REFUSES to emit an unsigned feed unless explicitly overridden.
-      - name: Build agent feed index (and prove it refuses to go unsigned)
+      - name: Build hub-lite feed index (and prove it refuses to go unsigned)
         run: |
-          ALLOW_UNSIGNED=1 sh agent/package/build-feed.sh
+          ALLOW_UNSIGNED=1 sh hub-lite/package/build-feed.sh
           grep -q '^SHA256sum: ' dist/Packages
-          grep -q "^Version: $(sed -n 's/^AGENT_VERSION="\([^"]*\)".*/\1/p' agent/brvg-agent.sh)" dist/Packages
-          if sh agent/package/build-feed.sh >/dev/null 2>&1; then
+          grep -q "^Version: $(sed -n 's/^HUB_LITE_VERSION="\([^"]*\)".*/\1/p' hub-lite/brvg-hub-lite.sh)" dist/Packages
+          if sh hub-lite/package/build-feed.sh >/dev/null 2>&1; then
             echo "build-feed.sh produced an UNSIGNED feed without ALLOW_UNSIGNED" >&2
             exit 1
           fi

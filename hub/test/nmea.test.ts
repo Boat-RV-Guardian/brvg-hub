@@ -94,7 +94,7 @@ describe('report governor (report half of the app gpsSmart rules)', () => {
   });
 });
 
-describe('fixToParams (the shell agent wire shape)', () => {
+describe('fixToParams (the shell hub-lite wire shape)', () => {
   it('formats lat/lon at 5 decimals and acc as whole meters', () => {
     expect(fixToParams({ lat: 41.49000123, lon: -81.73, acc: 4.5 }))
       .toEqual({ lat: '41.49000', lon: '-81.73000', acc: '5' });

@@ -5,15 +5,15 @@ that the GL.iNet could run… it should have Z-Wave and Bluetooth capabilities�
 device."*
 
 The strategic point is that this box **decouples what we can do from which router the customer
-owns**. The agent is the same one the routers run — one codebase, two homes — so everything
+owns**. The hub-lite is the same one the routers run — one codebase, two homes — so everything
 already built (telemetry, per-device tokens, the command channel, plan tracking) works here on day
 one.
 
 ```sh
-sudo sh agent/hub/install.sh      # idempotent; re-run to upgrade
+sudo sh hub-lite/hub/install.sh      # idempotent; re-run to upgrade
 ```
 
-## Why a hub, not just the router agent
+## Why a hub, not just the router hub-lite
 
 It collapses five separate threads:
 
@@ -26,7 +26,7 @@ It collapses five separate threads:
    line-of-sight. **Field-verify before it retires the YoLink track**; a datasheet is not a boat.
 4. **Camera snapshot ingest** wanted "the first always-on non-serverless component". The hub *is*
    that component — at the boat, keeping the cloud serverless.
-5. **GPS** for routers with no antenna port: the same USB dongle path the agent already supports.
+5. **GPS** for routers with no antenna port: the same USB dongle path the hub-lite already supports.
 
 ## Hardware notes (learned, not guessed)
 
@@ -41,9 +41,9 @@ It collapses five separate threads:
 
 ## What this scaffolding does and doesn't do
 
-**Does**: installs the agent + systemd unit, pulls curl/gpsd/bluez, reports which serial devices
+**Does**: installs the hub-lite + systemd unit, pulls curl/gpsd/bluez, reports which serial devices
 and Bluetooth adapters are actually present (so the bench spike starts from facts, not assumptions),
-enables the service, and refuses to start it without a configuration — an agent with no config
+enables the service, and refuses to start it without a configuration — an hub-lite with no config
 exits fatally, and a service that flaps looks like a bug.
 
 **Doesn't**: install a Z-Wave stack. That is the next increment and it wants Node (Z-Wave JS); the

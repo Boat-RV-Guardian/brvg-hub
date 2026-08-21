@@ -1,18 +1,18 @@
 #!/bin/sh
-# Make a USB GPS dongle visible to the BRVG agent on an OpenWrt router (GL.iNet and friends).
+# Make a USB GPS dongle visible to the BRVG hub-lite on an OpenWrt router (GL.iNet and friends).
 #
 # ⚠️ REWRITTEN 2026-08-16. This script used to install ser2net and publish the receiver as a TCP
 # NMEA stream for the app to poll. That was the wrong design and is gone. A USB GPS is a SERIAL
-# device on the router, and the agent already reads it: `GPS_SOURCE=auto` tries the modem's GNSS,
+# device on the router, and the hub-lite already reads it: `GPS_SOURCE=auto` tries the modem's GNSS,
 # then a USB NMEA device, then gpsd, and pushes fixes outbound. The TCP path added a service to
-# install, a port to open, a desktop-app dependency and a second reader competing with the agent
-# for the same device — to arrive at a position the agent was already sending, and only while
+# install, a port to open, a desktop-app dependency and a second reader competing with the hub-lite
+# for the same device — to arrive at a position the hub-lite was already sending, and only while
 # somebody was aboard with the app open.
 #
 # So all that is actually needed is the KERNEL MODULES that make the dongle appear as /dev/ttyACM0.
-# That is what this does, plus telling you whether the agent can now see it.
+# That is what this does, plus telling you whether the hub-lite can now see it.
 #
-# Not run from the package's postinst: the dongle is usually plugged in after the agent is
+# Not run from the package's postinst: the dongle is usually plugged in after the hub-lite is
 # installed, and opkg needs working internet at that moment. Idempotent — plug it in, run it, done.
 #
 # Usage:  sh setup-usb-gps.sh [--device /dev/ttyACM0] [--port 10110] [--baud 9600]
@@ -45,9 +45,9 @@ done
 log()  { echo "[usb-gps] $*"; }
 die()  { echo "[usb-gps] ERROR: $*" >&2; exit 1; }
 
-# The agent's AT port must never be mistaken for the receiver — reading it steals the modem's
-# control channel. Mirrors brvg-agent.sh's find_nmea_device().
-AT_PORT=$(sed -n 's/^[[:space:]]*AT_PORT=["'\'']\{0,1\}\([^"'\'' ]*\).*/\1/p' /etc/brvg-agent.conf 2>/dev/null | tail -1)
+# The hub-lite's AT port must never be mistaken for the receiver — reading it steals the modem's
+# control channel. Mirrors brvg-hub-lite.sh's find_nmea_device().
+AT_PORT=$(sed -n 's/^[[:space:]]*AT_PORT=["'\'']\{0,1\}\([^"'\'' ]*\).*/\1/p' /etc/brvg-hub-lite.conf 2>/dev/null | tail -1)
 [ -n "$AT_PORT" ] || AT_PORT=/dev/ttyUSB2
 
 find_device() {
@@ -66,7 +66,7 @@ lan_ip() {
 # ── status ─────────────────────────────────────────────────────────────────────────────────────
 if [ "$ACTION" = "status" ]; then
   d=$(find_device) && log "receiver: $d" || log "receiver: NONE FOUND"
-  grep -sE '^[[:space:]]*GPS_SOURCE=' /etc/brvg-agent.conf 2>/dev/null || log "agent GPS_SOURCE: unset (defaults to auto)"
+  grep -sE '^[[:space:]]*GPS_SOURCE=' /etc/brvg-hub-lite.conf 2>/dev/null || log "hub-lite GPS_SOURCE: unset (defaults to auto)"
   exit 0
 fi
 
@@ -106,14 +106,14 @@ else
   log "         start can take minutes with a clear sky view), or it is not a GPS receiver."
 fi
 
-# The agent reads it on its own. Nothing to serve, nothing to open.
-if [ -f /etc/brvg-agent.conf ] && grep -qE '^[[:space:]]*GPS_SOURCE=["'\'']?(at|off)' /etc/brvg-agent.conf 2>/dev/null; then
+# The hub-lite reads it on its own. Nothing to serve, nothing to open.
+if [ -f /etc/brvg-hub-lite.conf ] && grep -qE '^[[:space:]]*GPS_SOURCE=["'\'']?(at|off)' /etc/brvg-hub-lite.conf 2>/dev/null; then
   log ""
-  log "NOTE: the agent is set to GPS_SOURCE=at, so it will use the modem's GNSS and ignore this"
-  log "      receiver. Set GPS_SOURCE=auto (or nmea) in /etc/brvg-agent.conf to use the dongle."
+  log "NOTE: the hub-lite is set to GPS_SOURCE=at, so it will use the modem's GNSS and ignore this"
+  log "      receiver. Set GPS_SOURCE=auto (or nmea) in /etc/brvg-hub-lite.conf to use the dongle."
 fi
 
 log ""
-log "Done. The agent picks the receiver up on its next GPS tick — GPS_SOURCE=auto tries the modem"
-log "first, then this device. Nothing else to install: position reaches the app through the agent's"
+log "Done. The hub-lite picks the receiver up on its next GPS tick — GPS_SOURCE=auto tries the modem"
+log "first, then this device. Nothing else to install: position reaches the app through the hub-lite's"
 log "normal reports, so it works with nobody aboard."

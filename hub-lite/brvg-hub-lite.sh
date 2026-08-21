@@ -1,8 +1,8 @@
 #!/bin/sh
-# BRVG phone-home agent — Phase A skeleton (telemetry push; the command channel is Phase B).
+# BRVG phone-home hub-lite — Phase A skeleton (telemetry push; the command channel is Phase B).
 #
-# One POSIX-shell agent, two homes: a GL.iNet router (busybox ash, AT commands straight to the
-# modem port — the agent runs as root on-device, so no RPC login is needed) and a Raspberry
+# One POSIX-shell hub-lite, two homes: a GL.iNet router (busybox ash, AT commands straight to the
+# modem port — the hub-lite runs as root on-device, so no RPC login is needed) and a Raspberry
 # Pi-class hub (gpsd or a raw NMEA serial dongle). It pushes GPS and modem telemetry OUTBOUND
 # over HTTPS to the hosted worker on a timer — no inbound path exists behind CGNAT, and none is
 # needed. The command channel (Phase B) is deliberately absent from this skeleton.
@@ -16,18 +16,18 @@
 # every request is a single small GET, and a failed send is dropped (next tick retries) rather
 # than queued — Phase A is telemetry, not a store-and-forward system.
 #
-# Everything parseable is in awk functions at the top, exercised by agent/test.sh with strings
+# Everything parseable is in awk functions at the top, exercised by hub-lite/test.sh with strings
 # captured from real hardware (GL-X750 bench session 2026-08-06).
 #
-# Self-update (owner requirement: "build the secure solution"). The agent NEVER downloads or
+# Self-update (owner requirement: "build the secure solution"). The hub-lite NEVER downloads or
 # evaluates code it was handed. `self_update` takes NO argument: it asks opkg to install from the
 # SIGNED feed the router is already configured with, so WHAT gets installed is decided by the
 # signed index and verified on-device by the package manager, while the cloud only decides WHO is
-# told to update and WHEN (staged rollout). The previous agent is kept and automatically restored
+# told to update and WHEN (staged rollout). The previous hub-lite is kept and automatically restored
 # if the new one cannot even report its own version.
 
-AGENT_VERSION="0.13.0"
-AGENT_BACKUP="/etc/brvg-agent.prev"
+HUB_LITE_VERSION="0.13.0"
+HUB_LITE_BACKUP="/etc/brvg-hub-lite.prev"
 
 
 # --- Pure parsers (stdin → stdout; empty output = no data) -------------------------------------
@@ -116,7 +116,7 @@ urlencode_spaces() { printf '%s' "$1" | sed 's/ /%20/g; s/&/%26/g'; }
 # --- Relay: spool → batch report (ONSITE.md "The one wire contract", relay tier) ---------------
 # The CGI receiver (hub-lite-cgi.sh) appends webhook lines to a spool; these functions roll the spool
 # up into ONE batch POST. Wire contract: brvg-cloud-server/src/agentBatch.ts (v1); the canonical
-# fixture there is what agent/test.sh checks this output against.
+# fixture there is what hub-lite/test.sh checks this output against.
 #
 # ⚠️ On the saving: an earlier version of this comment claimed the TLS handshake dominates, so
 # collapsing connections saved most of the data. MEASURED IN PRODUCTION 2026-08-14 and that is
@@ -189,7 +189,7 @@ build_batch_json() {
     _ok="$_ok\"$_d\""
   done
   _ok="$_ok]"
-  printf '{"v":1,"seq":%s,"boot":"%s","kind":"%s","items":%s,"ok":%s,"agent":{"av":"%s","tier":"hub-lite"}}'     "$1" "$5" "$2" "${3:-[]}" "$_ok" "$AGENT_VERSION"
+  printf '{"v":1,"seq":%s,"boot":"%s","kind":"%s","items":%s,"ok":%s,"agent":{"av":"%s","tier":"hub-lite"}}'     "$1" "$5" "$2" "${3:-[]}" "$_ok" "$HUB_LITE_VERSION"
 }
 
 RELAY_SPOOL="${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
@@ -287,7 +287,7 @@ EOF_DEVS2
 
 # --- Config ------------------------------------------------------------------------------------
 
-CONF="${BRVG_AGENT_CONF:-/etc/brvg-agent.conf}"
+CONF="${BRVG_HUB_LITE_CONF:-/etc/brvg-hub-lite.conf}"
 
 load_config() {
   # shellcheck disable=SC1090
@@ -301,24 +301,24 @@ load_config() {
   GPS_SOURCE="${GPS_SOURCE:-auto}"                    # auto | at | gpsd | nmea
   GPS_DEVICE="${GPS_DEVICE:-}"                        # serial NMEA dongle for GPS_SOURCE=nmea
   if [ -z "$VID" ] || [ -z "$DEVICE_ID" ]; then
-    echo "brvg-agent: VID and DEVICE_ID are required in $CONF" >&2
+    echo "brvg-hub-lite: VID and DEVICE_ID are required in $CONF" >&2
     exit 1
   fi
   if [ -z "${DEVICE_TOKEN:-}" ] && [ -z "${VEHICLE_KEY:-}" ]; then
-    echo "brvg-agent: DEVICE_TOKEN (preferred) or VEHICLE_KEY is required in $CONF" >&2
+    echo "brvg-hub-lite: DEVICE_TOKEN (preferred) or VEHICLE_KEY is required in $CONF" >&2
     exit 1
   fi
   case "$WORKER_URL" in
     https://*) : ;;
-    *) echo "brvg-agent: WORKER_URL must be https" >&2; exit 1 ;;
+    *) echo "brvg-hub-lite: WORKER_URL must be https" >&2; exit 1 ;;
   esac
 }
 
-log() { echo "brvg-agent: $*" >&2; }
+log() { echo "brvg-hub-lite: $*" >&2; }
 
 # --- AT transport (GL.iNet path — root on-device, straight to the modem port) ------------------
 
-AT_BUF="${TMPDIR:-/tmp}/brvg-agent.at.$$"
+AT_BUF="${TMPDIR:-/tmp}/brvg-hub-lite.at.$$"
 
 at_cmd() {
   # $1 = command, $2 = read window seconds (send_at blocks modem-side; GNSS reads answer fast)
@@ -345,7 +345,7 @@ detect_platform() {
 # A plugged-in USB GPS receiver, if any. This is the answer for routers whose modem has no GPS
 # antenna port (hardware-verified on a GL-X750, 2026-08-06): a ~$15 u-blox dongle appears as a
 # serial device streaming NMEA, and costs nothing to check for. Requires the kernel modules
-# (kmod-usb-acm / kmod-usb-serial-*) — see agent/README.md.
+# (kmod-usb-acm / kmod-usb-serial-*) — see hub-lite/README.md.
 find_nmea_device() {
   [ -n "$GPS_DEVICE" ] && [ -c "$GPS_DEVICE" ] && { echo "$GPS_DEVICE"; return 0; }
   for _d in /dev/ttyACM0 /dev/ttyACM1 /dev/ttyUSB3 /dev/ttyUSB4; do
@@ -363,7 +363,7 @@ read_nmea_device() {
 }
 
 # NMEA over TCP — a chartplotter, AIS, gpsd, or a router serving NMEA on the LAN (GPS parity with
-# the hub's NMEA_HOST source; owner sprint 2026-08-17). The agent is always the CLIENT.
+# the hub's NMEA_HOST source; owner sprint 2026-08-17). The hub-lite is always the CLIENT.
 # ⚠️ BENCH-VERIFY before shipping to customers: busybox `nc` on FACTORY-STOCK GL.iNet firmware.
 # The bench box has extra packages installed, so it proves nothing about a stock router — the same
 # trap that made hand-installed Lua look like a working dependency.
@@ -578,18 +578,18 @@ set_intervals() {
   MODEM_INTERVAL="$2"
   [ "$GPS_INTERVAL" -lt 30 ] && GPS_INTERVAL=30
   [ "$MODEM_INTERVAL" -lt 60 ] && MODEM_INTERVAL=60
-  if [ -f /etc/brvg-agent.conf ]; then
-    _tmp="/etc/brvg-agent.conf.$$"
-    grep -vE '^[[:space:]]*(GPS_INTERVAL|MODEM_INTERVAL)=' /etc/brvg-agent.conf > "$_tmp" 2>/dev/null || true
+  if [ -f /etc/brvg-hub-lite.conf ]; then
+    _tmp="/etc/brvg-hub-lite.conf.$$"
+    grep -vE '^[[:space:]]*(GPS_INTERVAL|MODEM_INTERVAL)=' /etc/brvg-hub-lite.conf > "$_tmp" 2>/dev/null || true
     printf 'GPS_INTERVAL=%s\nMODEM_INTERVAL=%s\n' "$GPS_INTERVAL" "$MODEM_INTERVAL" >> "$_tmp"
     chmod 600 "$_tmp" 2>/dev/null
-    mv "$_tmp" /etc/brvg-agent.conf
+    mv "$_tmp" /etc/brvg-hub-lite.conf
   fi
   FOLLOWUP_REPORT=1
 }
 
 # Execute the allowlisted verbs the cloud queued. An unknown verb is acknowledged and DROPPED —
-# never passed to a shell — so a queue this agent doesn't understand can't become code execution.
+# never passed to a shell — so a queue this hub-lite doesn't understand can't become code execution.
 run_commands() {
   for _entry in $1; do
     _id=${_entry%%:*}
@@ -597,10 +597,10 @@ run_commands() {
     case "$_cmd" in
       # FOLLOWUP_REPORT=1 on the verbs whose result is worth seeing immediately AND that leave the
       # uplink intact. Deliberately NOT set for reboot/reboot_modem (the link is about to drop, so
-      # the extra send would just fail) or the update verbs (the agent is being replaced).
+      # the extra send would just fail) or the update verbs (the hub-lite is being replaced).
       report_now)   log "command: report_now"; FOLLOWUP_REPORT=1 ;;
       self_update)  log "command: self_update"; self_update ;;
-      rollback_agent) log "command: rollback_agent"; restore_agent "requested" ;;
+      rollback_agent) log "command: rollback_agent"; restore_hub_lite "requested" ;;
       reboot)       log "command: reboot"; (sleep 5; reboot) >/dev/null 2>&1 & ;;
       reboot_modem) log "command: reboot_modem"; at_cmd 'AT+CFUN=1,1' 5 >/dev/null 2>&1 ;;
       reset_data)   log "command: reset_data"; at_cmd 'AT+QGDCNT=0' 3 >/dev/null 2>&1; FOLLOWUP_REPORT=1 ;;
@@ -670,22 +670,22 @@ run_commands() {
 # Deliberately argument-free. The command channel carries a verb and nothing else, so there is no
 # attacker-controlled string anywhere in this path: no URL, no version, no filename.
 
-agent_path() {
+hub_lite_path() {
   # Where this script is installed. Falls back to the packaged path.
-  command -v brvg-agent 2>/dev/null || echo /usr/bin/brvg-agent
+  command -v brvg-hub-lite 2>/dev/null || echo /usr/bin/brvg-hub-lite
 }
 
-# Restore the kept-back copy of the previous agent. Used both by the rollback verb and
-# automatically when a freshly installed agent fails its smoke check.
-restore_agent() {
-  _self=$(agent_path)
-  if [ ! -s "$AGENT_BACKUP" ]; then
+# Restore the kept-back copy of the previous hub-lite. Used both by the rollback verb and
+# automatically when a freshly installed hub-lite fails its smoke check.
+restore_hub_lite() {
+  _self=$(hub_lite_path)
+  if [ ! -s "$HUB_LITE_BACKUP" ]; then
     log "rollback: no previous version kept ($1)"
     return 1
   fi
-  cp "$AGENT_BACKUP" "$_self" && chmod 0755 "$_self" || { log "rollback: copy failed"; return 1; }
-  log "rolled back to the previous agent ($1); restarting"
-  [ -x /etc/init.d/brvg-agent ] && (sleep 2; /etc/init.d/brvg-agent restart) >/dev/null 2>&1 &
+  cp "$HUB_LITE_BACKUP" "$_self" && chmod 0755 "$_self" || { log "rollback: copy failed"; return 1; }
+  log "rolled back to the previous hub-lite ($1); restarting"
+  [ -x /etc/init.d/brvg-hub-lite ] && (sleep 2; /etc/init.d/brvg-hub-lite restart) >/dev/null 2>&1 &
   return 0
 }
 
@@ -696,9 +696,9 @@ self_update() {
     log "self_update: no opkg on this platform — skipping"
     return 0
   fi
-  _self=$(agent_path)
-  # Keep the running agent so a bad release is one command (or one failed smoke check) from undone.
-  cp "$_self" "$AGENT_BACKUP" 2>/dev/null && chmod 0644 "$AGENT_BACKUP" 2>/dev/null
+  _self=$(hub_lite_path)
+  # Keep the running hub-lite so a bad release is one command (or one failed smoke check) from undone.
+  cp "$_self" "$HUB_LITE_BACKUP" 2>/dev/null && chmod 0644 "$HUB_LITE_BACKUP" 2>/dev/null
 
   # opkg verifies the feed's usign signature itself; --no-check-certificate and friends are
   # deliberately NOT used. A feed that fails its signature check simply does not install.
@@ -706,19 +706,19 @@ self_update() {
     log "self_update: feed refresh failed (offline, or the feed signature did not verify)"
     return 1
   fi
-  if ! opkg upgrade brvg-agent >/dev/null 2>&1; then
+  if ! opkg upgrade brvg-hub-lite >/dev/null 2>&1; then
     log "self_update: no upgrade applied (already current, or the package failed verification)"
     return 1
   fi
 
   # Smoke-check the thing we just installed BEFORE trusting it to keep the vehicle reporting.
   if ! "$_self" --version >/dev/null 2>&1; then
-    log "self_update: the new agent failed its version check"
-    restore_agent "failed smoke check"
+    log "self_update: the new hub-lite failed its version check"
+    restore_hub_lite "failed smoke check"
     return 1
   fi
   log "self_update: installed $("$_self" --version 2>/dev/null); restarting"
-  [ -x /etc/init.d/brvg-agent ] && (sleep 2; /etc/init.d/brvg-agent restart) >/dev/null 2>&1 &
+  [ -x /etc/init.d/brvg-hub-lite ] && (sleep 2; /etc/init.d/brvg-hub-lite restart) >/dev/null 2>&1 &
   return 0
 }
 
@@ -980,10 +980,10 @@ push_modem() {
       _p="$_p&dataMb=$_mb"
     fi
   fi
-  # Report which agent version is running, plus per-source WAN usage. Staged rollout and rollback
+  # Report which hub-lite version is running, plus per-source WAN usage. Staged rollout and rollback
   # are unmanageable without the version: you cannot decide who to update next if you cannot see
   # what is deployed.
-  _p="$_p&av=$AGENT_VERSION$(collect_wan_usage)"
+  _p="$_p&av=$HUB_LITE_VERSION$(collect_wan_usage)"
   send_event "modem.measurement" "$_p"
 }
 
@@ -1034,7 +1034,7 @@ linktap_flood_close() {
     fi
     printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "lt_${_d}" "linktap.flood_close.change" "ok=${_ok}" \
       >> "${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
-    logger -t brvg-agent "flood shutoff: valve ${_d} close ok=${_ok}" 2>/dev/null || true
+    logger -t brvg-hub-lite "flood shutoff: valve ${_d} close ok=${_ok}" 2>/dev/null || true
   done
 }
 
@@ -1230,13 +1230,13 @@ linktap_tick() {
       adopt)
         # Manual press / external open IS a Normal Run with the profile cap (owner rule).
         printf 'state=watering\nstarted=%s\nstop=\n' "$(date +%s)" > "$_sf"
-        logger -t brvg-agent "linktap: adopted a running cycle on ${_d} (Normal Run cap ${_capL}L)" 2>/dev/null || true
+        logger -t brvg-hub-lite "linktap: adopted a running cycle on ${_d} (Normal Run cap ${_capL}L)" 2>/dev/null || true
         ;;
       cut)
         curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
           -d "$(linktap_stop_body "$LINKTAP_GW_ID" "$_d")" "http://${LINKTAP_HOST}/api.shtml" >/dev/null 2>&1
         printf 'state=watering\nstarted=%s\nstop=volume_cap\n' "$_started" > "$_sf"
-        logger -t brvg-agent "linktap: volume cap ${_capL}L reached on ${_d} — stop issued" 2>/dev/null || true
+        logger -t brvg-hub-lite "linktap: volume cap ${_capL}L reached on ${_d} — stop issued" 2>/dev/null || true
         ;;
       ended:*)
         _reason="${_act#ended:}"
@@ -1253,7 +1253,7 @@ linktap_tick() {
           curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
             -d "$(lt_start_body "$LINKTAP_GW_ID" "$_d" "$_dur" "$_capGw")" "http://${LINKTAP_HOST}/api.shtml" >/dev/null 2>&1 \
             && printf 'state=watering\nstarted=%s\nstop=\n' "$(date +%s)" > "$_sf"
-          logger -t brvg-agent "linktap: timer expired on ${_d}, auto-restart on — fresh Normal Run" 2>/dev/null || true
+          logger -t brvg-hub-lite "linktap: timer expired on ${_d}, auto-restart on — fresh Normal Run" 2>/dev/null || true
         fi
         ;;
       none) : ;;
@@ -1316,12 +1316,12 @@ main() {
 }
 
 # `--version` must work without a config: the self-update smoke check runs it on a freshly
-# installed agent before that agent has ever been configured.
+# installed hub-lite before that hub-lite has ever been configured.
 case "${1:-}" in
-  --version|-v) echo "$AGENT_VERSION"; exit 0 ;;
+  --version|-v) echo "$HUB_LITE_VERSION"; exit 0 ;;
 esac
 
-# Sourced by agent/test.sh with BRVG_AGENT_TEST set — parsers only, no loop, no config.
-if [ -z "$BRVG_AGENT_TEST" ]; then
+# Sourced by hub-lite/test.sh with BRVG_HUB_LITE_TEST set — parsers only, no loop, no config.
+if [ -z "$BRVG_HUB_LITE_TEST" ]; then
   main "$@"
 fi

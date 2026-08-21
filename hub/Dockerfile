@@ -1,5 +1,5 @@
 # BRVG hub — multi-arch (amd64/arm64/armv7 via buildx) Node image. Two stages so the runtime
-# carries no toolchain and no dev deps: the agent has zero runtime dependencies (Node built-in
+# carries no toolchain and no dev deps: the hub has zero runtime dependencies (Node built-in
 # http + global fetch), so `npm ci --omit=dev` installs nothing and the final image is just Node +
 # the compiled dist.
 

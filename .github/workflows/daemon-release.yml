@@ -115,7 +115,7 @@ jobs:
           mkdir -p "$ROOT/Library/Application Support/BoatRVGuardian/bin" "$ROOT/Library/LaunchDaemons" "$ROOT/Library/LaunchAgents" scripts
           cp "${{ matrix.artifact }}" "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub"
           chmod 755 "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub"
-          # The tray binary sits beside the daemon; 755 so the logged-in user (the agent runs as
+          # The tray binary sits beside the daemon; 755 so the logged-in user (the hub-lite runs as
           # them, not root) can execute it.
           cp brvg-hub-tray "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub-tray"
           chmod 755 "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub-tray"
@@ -226,7 +226,7 @@ jobs:
           # `releases/latest/download/…` links (owner 2026-08-19: no version pin — "why possibly
           # install an old version"). Those links follow whichever release is MARKED latest, so a
           # daemon release must always claim the mark — and if this repo ever grows another release
-          # family (agent, TS hub), those must pass --latest=false or they will hijack the app's
+          # family (hub-lite, TS hub), those must pass --latest=false or they will hijack the app's
           # hub download.
           gh release create "$GITHUB_REF_NAME" brvg-hub-* SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \

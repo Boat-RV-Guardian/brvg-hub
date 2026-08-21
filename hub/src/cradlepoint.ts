@@ -5,7 +5,7 @@
 // the sign riding on `degree`, decimal fallback, nested/flat envelopes); the test fixtures are
 // copied byte-for-byte from gpsSources.test.ts — change them together.
 //
-// No governor here: one poll per interval IS the cadence (the shell agent's push_gps behaves the
+// No governor here: one poll per interval IS the cadence (the shell hub-lite's push_gps behaves the
 // same way), and the aggregator's unchanged-signature dedup means a stationary vessel rides the
 // `ok` list instead of resending the same coordinates.
 

@@ -1,6 +1,6 @@
-# BRVG phone-home agent (Phase A)
+# BRVG phone-home hub-lite (Phase A)
 
-One POSIX-shell agent, two homes: a **GL.iNet router** (busybox ash, procd) and a **Raspberry
+One POSIX-shell hub-lite, two homes: a **GL.iNet router** (busybox ash, procd) and a **Raspberry
 Pi-class hub** (systemd). It pushes GPS and modem telemetry **outbound** over HTTPS to the hosted
 worker on a timer, so the vehicle reports without the app being onsite. Phase A = telemetry push;
 the Phase B command channel is deliberately not in this skeleton.
@@ -23,7 +23,7 @@ webhook key (`VEHICLE_KEY` → `/api/shelly?...&k=`). Both land in the identical
 ## Install — from the app (the normal path)
 
 Router panel → **☁️ Cloud reporting → Connect to cloud**. The desktop app mints this device's
-token and installs the agent onto the router over SSH using the admin password it already holds:
+token and installs the hub-lite onto the router over SSH using the admin password it already holds:
 script, init service and the token-bearing config are written, the service is enabled, started and
 verified. **No files are edited by hand.**
 
@@ -31,22 +31,22 @@ Availability: desktop (Tauri) builds only — the SSH client is deliberately kep
 binary (see `src-tauri/Cargo.toml`). Where it isn't available the app shows the manual steps below
 instead of a button that cannot work. The eventual all-platform path is an **opkg feed**
 (`plugins.install_package` exists in the 4.x RPC surface, so a signed .ipk installs with no SSH at
-all) — that lands with the packaged agent under the signed-artifact bar.
+all) — that lands with the packaged hub-lite under the signed-artifact bar.
 
 ## Install — by hand (fallback / non-GL.iNet)
 
 GL.iNet (tested platform: GL-X750, fw 4.3.28)
 
 ```sh
-scp agent/brvg-agent.sh root@192.168.8.1:/usr/bin/brvg-agent
-scp agent/brvg-agent.conf.example root@192.168.8.1:/etc/brvg-agent.conf
-scp agent/openwrt/etc/init.d/brvg-agent root@192.168.8.1:/etc/init.d/brvg-agent
-ssh root@192.168.8.1 'chmod 755 /usr/bin/brvg-agent /etc/init.d/brvg-agent; chmod 600 /etc/brvg-agent.conf'
-# edit /etc/brvg-agent.conf (VID, DEVICE_ID, VEHICLE_KEY), then:
-ssh root@192.168.8.1 '/etc/init.d/brvg-agent enable && /etc/init.d/brvg-agent start; logread -f | grep brvg'
+scp hub-lite/brvg-hub-lite.sh root@192.168.8.1:/usr/bin/brvg-hub-lite
+scp hub-lite/brvg-hub-lite.conf.example root@192.168.8.1:/etc/brvg-hub-lite.conf
+scp hub-lite/openwrt/etc/init.d/brvg-hub-lite root@192.168.8.1:/etc/init.d/brvg-hub-lite
+ssh root@192.168.8.1 'chmod 755 /usr/bin/brvg-hub-lite /etc/init.d/brvg-hub-lite; chmod 600 /etc/brvg-hub-lite.conf'
+# edit /etc/brvg-hub-lite.conf (VID, DEVICE_ID, VEHICLE_KEY), then:
+ssh root@192.168.8.1 '/etc/init.d/brvg-hub-lite enable && /etc/init.d/brvg-hub-lite start; logread -f | grep brvg'
 ```
 
-GPS/modem are read with AT commands straight to the modem port — the agent runs as root
+GPS/modem are read with AT commands straight to the modem port — the hub-lite runs as root
 on-device, so no RPC login is involved. `AT_PORT` defaults to `/dev/ttyUSB2` (correct for the
 X750's EC25). **X3000-class PCIe modems (RM520) expose a different device** — check
 `ls /dev/mhi_* /dev/ttyUSB*` on the unit and set `AT_PORT`; expect `/dev/mhi_DUN`-style names
@@ -54,15 +54,15 @@ X750's EC25). **X3000-class PCIe modems (RM520) expose a different device** — 
 
 ## Install — Raspberry Pi hub
 
-**One command**: `sudo sh agent/hub/install.sh` (see [hub/README.md](hub/README.md) for what the
+**One command**: `sudo sh hub-lite/hub/install.sh` (see [hub/README.md](hub/README.md) for what the
 box is for and the hardware notes). The manual steps below are the same thing, unpacked.
 
 ```sh
-sudo cp agent/brvg-agent.sh /usr/local/bin/brvg-agent && sudo chmod 755 /usr/local/bin/brvg-agent
-sudo cp agent/brvg-agent.conf.example /etc/brvg-agent.conf && sudo chmod 600 /etc/brvg-agent.conf
-sudo cp agent/systemd/brvg-agent.service /etc/systemd/system/
-# edit /etc/brvg-agent.conf, then:
-sudo systemctl enable --now brvg-agent && journalctl -fu brvg-agent
+sudo cp hub-lite/brvg-hub-lite.sh /usr/local/bin/brvg-hub-lite && sudo chmod 755 /usr/local/bin/brvg-hub-lite
+sudo cp hub-lite/brvg-hub-lite.conf.example /etc/brvg-hub-lite.conf && sudo chmod 600 /etc/brvg-hub-lite.conf
+sudo cp hub-lite/systemd/brvg-hub-lite.service /etc/systemd/system/
+# edit /etc/brvg-hub-lite.conf, then:
+sudo systemctl enable --now brvg-hub-lite && journalctl -fu brvg-hub-lite
 ```
 
 ### GPS on a router with no GPS antenna port
@@ -70,7 +70,7 @@ sudo systemctl enable --now brvg-agent && journalctl -fu brvg-agent
 Some models (verified: **GL-X750** — two cellular SMA ports and nothing else) enable the modem's
 GNSS happily and then see zero satellites forever, because the receiver has no antenna wired to it.
 The fix is a **USB GPS dongle** (u-blox class, ~$15 — VK-162 / BU-353S4): plug it into the router's
-USB port and the agent finds it automatically. `GPS_SOURCE=auto` tries the modem first, then a USB
+USB port and the hub-lite finds it automatically. `GPS_SOURCE=auto` tries the modem first, then a USB
 NMEA device (`/dev/ttyACM*`, and `ttyUSB` ports that are not the modem's AT port), then gpsd — the
 ORDER matters, because a router with no GPS antenna answers the modem read forever with "no fix",
 so the dongle must be tried even when the modem is present and healthy.
@@ -81,11 +81,11 @@ it is really sending NMEA:
 
 ```sh
 brvg-setup-usb-gps            # plug the dongle in first; idempotent, safe to re-run
-brvg-setup-usb-gps --status   # what it found, and which GPS_SOURCE the agent is set to
+brvg-setup-usb-gps --status   # what it found, and which GPS_SOURCE the hub-lite is set to
 ```
 
 It installs `kmod-usb-acm` (u-blox and most CDC-ACM receivers) plus the FTDI/Prolific modules. That
-is all that is needed — the agent reads the device directly. It is NOT run at install time: the
+is all that is needed — the hub-lite reads the device directly. It is NOT run at install time: the
 dongle is normally plugged in later, and opkg needs the router online at the moment it runs.
 
 Pin it explicitly with `GPS_SOURCE=nmea` + `GPS_DEVICE=/dev/ttyACM0` if auto-detection picks wrong.
@@ -94,7 +94,7 @@ Two network sources join the chain (2026-08-17, GPS parity with the hub — expl
 part of `auto`):
 
 - **`GPS_SOURCE=tcp`** + `GPS_HOST`/`GPS_PORT` — NMEA 0183 served on the LAN (chartplotter, AIS,
-  gpsd). The agent dials in, reads a burst, and reuses the same RMC parser as the serial path.
+  gpsd). The hub-lite dials in, reads a burst, and reuses the same RMC parser as the serial path.
   ⚠️ Uses busybox `nc`; verify it exists on FACTORY-STOCK firmware before shipping (the same trap
   as the manually-installed Lua on the bench box).
 - **`GPS_SOURCE=cradlepoint`** + `CRADLEPOINT_HOST`/`_PORT`/`_USER`/`_PASSWORD` — poll a
@@ -104,18 +104,18 @@ part of `auto`):
 
 ### How the position actually reaches the app
 
-**The agent reads the dongle itself.** `GPS_SOURCE=auto` (the default the app writes) tries the
+**The hub-lite reads the dongle itself.** `GPS_SOURCE=auto` (the default the app writes) tries the
 modem's GNSS, then a USB NMEA device, then gpsd, and pushes fixes outbound on its normal GPS tick.
 There is nothing to serve and no port to open, and it works with nobody aboard.
 
 ⚠️ An earlier version of this doc described publishing the receiver over TCP with ser2net so the
 desktop app could poll it. **That was the wrong design and has been removed** (2026-08-16). A USB
 GPS is a serial device on the router; turning it into a network service added a daemon to install,
-a port to open, a desktop-only dependency, and a second reader competing with the agent for the same
-device — to arrive at a position the agent was already sending, and only while somebody was aboard.
+a port to open, a desktop-only dependency, and a second reader competing with the hub-lite for the same
+device — to arrive at a position the hub-lite was already sending, and only while somebody was aboard.
 
 If the app shows no position from the router, the order to check is: does `/dev/ttyACM0` exist
-(`brvg-setup-usb-gps --status`), is the agent running, and is `GPS_SOURCE` `auto` rather than `at`.
+(`brvg-setup-usb-gps --status`), is the hub-lite running, and is `GPS_SOURCE` `auto` rather than `at`.
 
 ## Behavior
 
@@ -128,8 +128,8 @@ If the app shows no position from the router, the order to check is: does `/dev/
 
 ## Tests
 
-`sh agent/test.sh` — every parser is exercised with responses captured from the real GL-X750
-bench session (2026-08-06) plus standard NMEA/gpsd shapes. Runs in CI (`agent` job).
+`sh hub-lite/test.sh` — every parser is exercised with responses captured from the real GL-X750
+bench session (2026-08-06) plus standard NMEA/gpsd shapes. Runs in CI (`hub-lite` job).
 
 ## Security posture (Phase A)
 
@@ -143,10 +143,10 @@ bench session (2026-08-06) plus standard NMEA/gpsd shapes. Runs in CI (`agent` j
 
 ## Relay tier (X750-class routers) — roll up the Shellys' reports
 
-`HUB_LITE_ENABLED=1` in `/etc/brvg-agent.conf` turns this agent into the **hub-lite tier** of the hub
+`HUB_LITE_ENABLED=1` in `/etc/brvg-hub-lite.conf` turns this hub-lite into the **hub-lite tier** of the hub
 architecture: a LAN-only uhttpd instance serves
 `hub-lite-cgi.sh` at `http://<router>:8181/cgi-bin/report`, the Shellys' webhooks are re-registered
-against it, and the agent drains the spool into ONE `/api/agent/batch` report per modem interval.
+against it, and the hub-lite drains the spool into ONE `/api/agent/batch` report per modem interval.
 
 Why: the metered link pays per TLS handshake, not per byte — one roll-up connection replaces one
 connection per device per event. And once no sensor talks to the internet directly, lockdown's

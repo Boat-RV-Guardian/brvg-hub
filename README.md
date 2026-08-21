@@ -6,7 +6,7 @@ cloud in one batched roll-up per interval — alarms immediately, never batched.
 
 Implementations of **one wire contract**:
 
-| | `daemon/` | `hub/` | `agent/` (hub-lite) |
+| | `daemon/` | `hub/` | `hub-lite/` (hub-lite) |
 | --- | --- | --- | --- |
 | Language | Rust | TypeScript (Node 18+, zero runtime deps) | POSIX shell + uhttpd CGI |
 | Hosts | Windows / macOS, as a boot service | Raspberry Pi, Docker, desktop | GL.iNet / OpenWrt-class routers (KBs footprint) |
@@ -18,7 +18,7 @@ change the contract in one place, a test goes red somewhere else — keep it tha
 
 > ⚠️ **`hub/` is FROZEN — no new capability (owner ruling 2026-08-19).** The project converged on
 > the Rust `daemon/` as the one full-hub implementation for every capable host. The TypeScript hub
-> keeps working as-is but stops growing; **new hub capability goes in `daemon/`.** `agent/` is
+> keeps working as-is but stops growing; **new hub capability goes in `daemon/`.** `hub-lite/` is
 > unaffected — it is the tier for constrained routers, not a duplicate. See `hub/README.md`.
 
 `daemon/` has no README of its own yet. It builds the `brvg-hub` service binary (installed as a
@@ -56,7 +56,7 @@ with. To feed your own hardware's telemetry through a collector:
   (`/cgi-bin/report?device=<id>&event=<name>&<values>`) — events named `*.measurement` / `*.change`
   batch as telemetry; anything else is treated as an alarm and forwarded at once.
 
-See `hub/README.md` and `agent/README.md` for running those tiers; for the daemon, read
+See `hub/README.md` and `hub-lite/README.md` for running those tiers; for the daemon, read
 `daemon/src/hub_server.rs` and its installer until it has a README.
 
 ## License

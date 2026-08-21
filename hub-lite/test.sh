@@ -1,12 +1,12 @@
 #!/bin/sh
-# Parser tests for the phone-home agent. Fixtures are REAL responses captured from the GL-X750
-# bench session (2026-08-06) plus standard NMEA/gpsd shapes. Run: sh agent/test.sh
+# Parser tests for the phone-home hub-lite. Fixtures are REAL responses captured from the GL-X750
+# bench session (2026-08-06) plus standard NMEA/gpsd shapes. Run: sh hub-lite/test.sh
 set -u
 
-BRVG_AGENT_TEST=1
-export BRVG_AGENT_TEST
+BRVG_HUB_LITE_TEST=1
+export BRVG_HUB_LITE_TEST
 # shellcheck disable=SC1091
-. "$(dirname "$0")/brvg-agent.sh"
+. "$(dirname "$0")/brvg-hub-lite.sh"
 
 fails=0
 check() {
@@ -142,10 +142,10 @@ out=$(printf '1\td1\te.change\tv=1\n2\td2\tf.change\tv=1\n3\td1\tg.alarm\tv=1\n'
 check "hub-lite: spool_devices dedups in first-seen order" 'd1
 d2' "$out"
 
-AGENT_VERSION_SAVED="$AGENT_VERSION"
+HUB_LITE_VERSION_SAVED="$HUB_LITE_VERSION"
 out=$(build_batch_json 42 delta '[{"device":"d1","event":"e.change","params":{}}]' "okdev1 okdev2" bootxyz)
 check "hub-lite: envelope carries seq/boot/kind/ok/tier" \
-  "{\"v\":1,\"seq\":42,\"boot\":\"bootxyz\",\"kind\":\"delta\",\"items\":[{\"device\":\"d1\",\"event\":\"e.change\",\"params\":{}}],\"ok\":[\"okdev1\",\"okdev2\"],\"agent\":{\"av\":\"$AGENT_VERSION_SAVED\",\"tier\":\"hub-lite\"}}" \
+  "{\"v\":1,\"seq\":42,\"boot\":\"bootxyz\",\"kind\":\"delta\",\"items\":[{\"device\":\"d1\",\"event\":\"e.change\",\"params\":{}}],\"ok\":[\"okdev1\",\"okdev2\"],\"agent\":{\"av\":\"$HUB_LITE_VERSION_SAVED\",\"tier\":\"hub-lite\"}}" \
   "$out"
 
 # --- boot id -----------------------------------------------------------------------------------
@@ -154,7 +154,7 @@ check "hub-lite: envelope carries seq/boot/kind/ok/tier" \
 # replay, answers 200 {duplicate}, and the drain deletes the spool — silent loss of every reading
 # until the counter climbs back. The id must be STABLE within a boot and DIFFERENT after one.
 _bootdir=$(mktemp -d)
-# Subshell, and RELAY_BOOT_FILE not BRVG_RELAY_BOOT: the var was already expanded when the agent
+# Subshell, and RELAY_BOOT_FILE not BRVG_RELAY_BOOT: the var was already expanded when the hub-lite
 # was sourced, and `VAR=x some_function` LEAKS in POSIX sh (it broke the --version test on 2026-08-13).
 _b1=$( RELAY_BOOT_FILE="$_bootdir/boot"; relay_boot_id )
 _b2=$( RELAY_BOOT_FILE="$_bootdir/boot"; relay_boot_id )
@@ -181,7 +181,7 @@ fi
 # --- relay CGI (run for real: no conf ⇒ the urgent path cannot send, so everything spools) ---
 _cgidir=$(mktemp -d)
 run_cgi() {
-  QUERY_STRING="$1" BRVG_AGENT_CONF=/nonexistent-conf BRVG_RELAY_SPOOL="$_cgidir/spool" \
+  QUERY_STRING="$1" BRVG_HUB_LITE_CONF=/nonexistent-conf BRVG_RELAY_SPOOL="$_cgidir/spool" \
     sh "$(dirname "$0")/hub-lite-cgi.sh" >/dev/null 2>&1
 }
 run_cgi 'device=shellyflood-a1&event=flood.alarm&temp=12%2C5'
@@ -207,14 +207,14 @@ check "params: a clean string has no duplicate keys" "" "$(dup_keys 'up=1&mode=L
 check "params: the guard actually detects a duplicate" "av" "$(dup_keys 'up=1&av=0.3.0&av=0.3.0')"
 # The real thing: build the version+usage suffix the way push_modem does and assert it is clean.
 # NB: computed in a SUBSHELL. `VAR=x some_function` leaks VAR into the current shell in POSIX sh —
-# an earlier draft of this very test set AGENT_VERSION inline and broke the --version test below.
-_suffix=$(BRVG_WAN_STATE=$(mktemp -d); export BRVG_WAN_STATE; printf 'up=1&av=%s%s' "$AGENT_VERSION" "$(collect_wan_usage)")
+# an earlier draft of this very test set HUB_LITE_VERSION inline and broke the --version test below.
+_suffix=$(BRVG_WAN_STATE=$(mktemp -d); export BRVG_WAN_STATE; printf 'up=1&av=%s%s' "$HUB_LITE_VERSION" "$(collect_wan_usage)")
 check "params: modem suffix carries av exactly once" "" "$(dup_keys "$_suffix")"
 
 # --- WAN usage deltas: the reset cases are the whole point ---
 check "wan_delta: normal increase" "500" "$(wan_delta 1000 1500)"
 # NOT "everything so far": on a fresh install the state dir is absent while the kernel counters hold
-# the router's whole uptime, so reporting $_cur charged weeks of pre-agent traffic to this billing
+# the router's whole uptime, so reporting $_cur charged weeks of pre-hub-lite traffic to this billing
 # cycle and could fire a false plan alert on day one. Baseline silently, count from the next tick.
 check "wan_delta: first sight reports NOTHING (baseline only)" "0" "$(wan_delta "" 1500)"
 check "wan_delta: first sight on a long-running router still reports nothing" "0" "$(wan_delta "" 9999999999)"
@@ -255,7 +255,7 @@ check "watchdog: already released ⇒ never release again" none "$(watch_decide 
 
 # --- bandwidth saver gate: watchdog must not probe or write state ----------------------------
 _bw_dir=$(mktemp -d)
-# HUB_WATCH_FAILS_FILE, not BRVG_HUB_FAILS: the env override was already expanded when the agent
+# HUB_WATCH_FAILS_FILE, not BRVG_HUB_FAILS: the env override was already expanded when the hub-lite
 # was sourced (same trap as the boot-id test above).
 ( BANDWIDTH_SAVER=1 HUB_WATCH_URL="http://127.0.0.1:1/healthz" HUB_WATCH_FAILS_FILE="$_bw_dir/fails" \
   HUB_WATCH_RELEASED="$_bw_dir/released"; watch_hub )
@@ -287,21 +287,21 @@ exit 0
 FAKEUCI
 chmod +x "$_uci_dir/uci"
 printf 'brvg_lk_allow_0\nbrvg_lk_allow_1\nmy_custom_rule\nbrvg_lk_deny\n' > "$_uci_dir/db"
-out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; release_lockdown >/dev/null 2>&1 && echo released' 2>/dev/null)
+out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-hub-lite.sh"; release_lockdown >/dev/null 2>&1 && echo released' 2>/dev/null)
 check "release_lockdown: reports success when rules existed" "released" "$out"
 check "release_lockdown: removes ONLY brvg_lk_* (hand-written rules survive)" "my_custom_rule" "$(cat "$_uci_dir/db")"
 # With nothing of ours applied it must report false, so the watchdog doesn't claim a release.
 printf 'my_custom_rule\n' > "$_uci_dir/db"
-out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; release_lockdown >/dev/null 2>&1 && echo released || echo nothing' 2>/dev/null)
+out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-hub-lite.sh"; release_lockdown >/dev/null 2>&1 && echo released || echo nothing' 2>/dev/null)
 check "release_lockdown: nothing of ours ⇒ reports nothing to release" "nothing" "$out"
 # --- apply_lockdown (the lockdown_on verb) against the same stand-in --------------------------
 printf 'my_custom_rule\n' > "$_uci_dir/db"
-out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; apply_lockdown >/dev/null 2>&1 && echo applied' 2>/dev/null)
+out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-hub-lite.sh"; apply_lockdown >/dev/null 2>&1 && echo applied' 2>/dev/null)
 check "apply_lockdown: reports success" "applied" "$out"
 check "apply_lockdown: catch-all lands under the shared prefix, hand-written rules survive" "my_custom_rule
 brvg_lk_deny_all" "$(cat "$_uci_dir/db")"
 # Re-apply must stay ONE rule (release-then-add), not accumulate a stack of them.
-out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-agent.sh"; apply_lockdown >/dev/null 2>&1; apply_lockdown >/dev/null 2>&1' 2>/dev/null)
+out=$(UCI_DB="$_uci_dir/db" PATH="$_uci_dir:$PATH" sh -c '. "'"$(dirname "$0")"'/brvg-hub-lite.sh"; apply_lockdown >/dev/null 2>&1; apply_lockdown >/dev/null 2>&1' 2>/dev/null)
 check "apply_lockdown: idempotent re-apply keeps exactly one rule" "my_custom_rule
 brvg_lk_deny_all" "$(cat "$_uci_dir/db")"
 rm -rf "$_uci_dir"
@@ -323,9 +323,9 @@ check "cradlepoint gps: garbage yields nothing" "" "$out"
 
 # --- version reporting + update verbs ---
 # `--version` must work with no config: the self-update smoke check runs it on a freshly installed
-# agent, before that agent has ever been configured.
-out=$(sh "$(dirname "$0")/brvg-agent.sh" --version 2>/dev/null)
-check "version: --version prints AGENT_VERSION without a config" "$AGENT_VERSION" "$out"
+# hub-lite, before that hub-lite has ever been configured.
+out=$(sh "$(dirname "$0")/brvg-hub-lite.sh" --version 2>/dev/null)
+check "version: --version prints HUB_LITE_VERSION without a config" "$HUB_LITE_VERSION" "$out"
 
 # The update verbs must parse like any other — and the payload must never carry an argument.
 out=$(printf '{"commands":[{"id":"u1","cmd":"self_update"}]}' | parse_commands)
@@ -517,7 +517,7 @@ if [ "$fails" -gt 0 ]; then
   echo "$fails test(s) FAILED"
   exit 1
 fi
-echo "all agent parser tests passed"
+echo "all hub-lite parser tests passed"
 
 # --- LinkTap cycle semantics on hub-lite (parity port) -------------------------------------------
 # These fixtures MIRROR hub/test/cycle.test.ts case for case — the one-contract rule. A case added

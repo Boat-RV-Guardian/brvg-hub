@@ -9,7 +9,7 @@
 #     Packages.sig  →  Packages (signed index)  →  SHA256Sum per .ipk  →  the .ipk itself
 #
 # Verification happens ON THE ROUTER, by the package manager, using a public key installed under
-# /etc/opkg/keys — not by anything we invent, and not by the agent itself.
+# /etc/opkg/keys — not by anything we invent, and not by the hub-lite itself.
 #
 # THIS SCRIPT REFUSES TO PRODUCE AN UNSIGNED FEED unless you explicitly ask for one. An unsigned
 # feed is not a smaller version of a signed feed; it is a remote-code-execution channel with the
@@ -17,11 +17,11 @@
 # was never turned on). Making that state require an obvious, ugly flag is the point.
 #
 # Usage:
-#   USIGN_KEY=/path/to/secret.key sh agent/package/build-feed.sh
-#   ALLOW_UNSIGNED=1 sh agent/package/build-feed.sh      # local testing ONLY — never publish this
+#   USIGN_KEY=/path/to/secret.key sh hub-lite/package/build-feed.sh
+#   ALLOW_UNSIGNED=1 sh hub-lite/package/build-feed.sh      # local testing ONLY — never publish this
 #
 # Key handling (owner infrastructure — see README.md):
-#   usign -G -s brvg-feed.key -p brvg-feed.pub -c "Boat & RV Guardian agent feed"
+#   usign -G -s brvg-feed.key -p brvg-feed.pub -c "Boat & RV Guardian hub-lite feed"
 # The SECRET key never leaves the machine that signs, is never committed, and never goes in CI
 # without a review of who can trigger a publish. The PUBLIC key ships to routers.
 

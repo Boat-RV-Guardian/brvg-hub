@@ -1,7 +1,7 @@
 #!/bin/sh
-# Build an OpenWrt .ipk of the phone-home agent.
+# Build an OpenWrt .ipk of the phone-home hub-lite.
 #
-# WHY this exists (ONSITE.md "Router phone-home"): the app installs the agent over SSH today, which works
+# WHY this exists (ONSITE.md "Router phone-home"): the app installs the hub-lite over SSH today, which works
 # but is desktop-only — the SSH client is deliberately kept out of the Android build. GL.iNet's 4.x
 # RPC surface has `plugins.install_package`, so a package installs with **no SSH at all**, from any
 # platform including a phone. It is also the natural home for the signed-artifact bar: opkg feeds
@@ -9,30 +9,30 @@
 # being something we invent.
 #
 # This script produces the package. PUBLISHING it (an opkg feed on R2 + the router pointed at it)
-# is owner infrastructure and is NOT done here — see agent/package/README.md.
+# is owner infrastructure and is NOT done here — see hub-lite/package/README.md.
 #
 # ipk format: an ar archive of debian-binary + control.tar.gz + data.tar.gz. No OpenWrt SDK, no
-# cross-compiler: the agent is POSIX shell, so the "build" is packaging.
+# cross-compiler: the hub-lite is POSIX shell, so the "build" is packaging.
 
 set -eu
 
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
-# The version comes from the agent itself. Two sources of truth would mean the feed advertising a
-# version the running agent doesn't report — which is precisely the signal a staged rollout uses
+# The version comes from the hub-lite itself. Two sources of truth would mean the feed advertising a
+# version the running hub-lite doesn't report — which is precisely the signal a staged rollout uses
 # to decide who still needs updating.
-VERSION="${VERSION:-$(sed -n 's/^AGENT_VERSION="\([^"]*\)".*/\1/p' "$SRC/brvg-agent.sh")}"
-[ -n "$VERSION" ] || { echo "could not read AGENT_VERSION from brvg-agent.sh" >&2; exit 1; }
+VERSION="${VERSION:-$(sed -n 's/^HUB_LITE_VERSION="\([^"]*\)".*/\1/p' "$SRC/brvg-hub-lite.sh")}"
+[ -n "$VERSION" ] || { echo "could not read HUB_LITE_VERSION from brvg-hub-lite.sh" >&2; exit 1; }
 OUT="${OUT:-$(pwd)/dist}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-PKG="brvg-agent"
+PKG="brvg-hub-lite"
 ARCH="all"                 # pure shell — architecture-independent
 
 mkdir -p "$WORK/data/usr/bin" "$WORK/data/etc/init.d" "$WORK/data/www/brvg/cgi-bin" "$WORK/control" "$OUT"
 
-install -m 0755 "$SRC/brvg-agent.sh" "$WORK/data/usr/bin/brvg-agent"
-install -m 0755 "$SRC/openwrt/etc/init.d/brvg-agent" "$WORK/data/etc/init.d/brvg-agent"
+install -m 0755 "$SRC/brvg-hub-lite.sh" "$WORK/data/usr/bin/brvg-hub-lite"
+install -m 0755 "$SRC/openwrt/etc/init.d/brvg-hub-lite" "$WORK/data/etc/init.d/brvg-hub-lite"
 # USB GPS → TCP NMEA setup. SHIPPED but not run at install: the dongle is normally plugged in later,
 # and it needs working internet for opkg. `brvg-setup-usb-gps` on the router does the whole job.
 install -m 0755 "$SRC/setup-usb-gps.sh" "$WORK/data/usr/bin/brvg-setup-usb-gps"
@@ -54,15 +54,15 @@ Description: Reports GPS and modem telemetry to Boat & RV Guardian, so the vehic
  keeps reporting when nobody has the app open aboard.
 EOF
 
-# Keep an existing /etc/brvg-agent.conf across upgrades — it holds the device's credential.
+# Keep an existing /etc/brvg-hub-lite.conf across upgrades — it holds the device's credential.
 cat > "$WORK/control/conffiles" <<'EOF'
-/etc/brvg-agent.conf
+/etc/brvg-hub-lite.conf
 EOF
 
 cat > "$WORK/control/postinst" <<'EOF'
 #!/bin/sh
-[ -f /etc/brvg-agent.conf ] && chmod 600 /etc/brvg-agent.conf
-/etc/init.d/brvg-agent enable 2>/dev/null || true
+[ -f /etc/brvg-hub-lite.conf ] && chmod 600 /etc/brvg-hub-lite.conf
+/etc/init.d/brvg-hub-lite enable 2>/dev/null || true
 # Deliberately NOT started here: without a config it would loop on a fatal error. The app starts it
 # after writing the configuration.
 exit 0
@@ -71,8 +71,8 @@ chmod 0755 "$WORK/control/postinst"
 
 cat > "$WORK/control/prerm" <<'EOF'
 #!/bin/sh
-/etc/init.d/brvg-agent stop 2>/dev/null || true
-/etc/init.d/brvg-agent disable 2>/dev/null || true
+/etc/init.d/brvg-hub-lite stop 2>/dev/null || true
+/etc/init.d/brvg-hub-lite disable 2>/dev/null || true
 exit 0
 EOF
 chmod 0755 "$WORK/control/prerm"
@@ -83,10 +83,10 @@ echo "2.0" > "$WORK/debian-binary"
 ( cd "$WORK/control" && tar czf "$WORK/control.tar.gz" . )
 
 # Verify the payload before sealing it: an empty or short package installs "successfully" and
-# leaves the router with no agent, which is the failure mode worth catching here rather than on
+# leaves the router with no hub-lite, which is the failure mode worth catching here rather than on
 # somebody's boat.
-tar tzf "$WORK/data.tar.gz" | grep -q './usr/bin/brvg-agent' || { echo "payload missing the agent" >&2; exit 1; }
-tar tzf "$WORK/data.tar.gz" | grep -q './etc/init.d/brvg-agent' || { echo "payload missing the init script" >&2; exit 1; }
+tar tzf "$WORK/data.tar.gz" | grep -q './usr/bin/brvg-hub-lite' || { echo "payload missing the hub-lite" >&2; exit 1; }
+tar tzf "$WORK/data.tar.gz" | grep -q './etc/init.d/brvg-hub-lite' || { echo "payload missing the init script" >&2; exit 1; }
 tar tzf "$WORK/data.tar.gz" | grep -q './www/brvg/cgi-bin/report' || { echo "payload missing the relay CGI" >&2; exit 1; }
 tar tzf "$WORK/control.tar.gz" | grep -q './control' || { echo "control archive incomplete" >&2; exit 1; }
 
