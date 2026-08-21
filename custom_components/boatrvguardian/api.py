@@ -78,9 +78,9 @@ class BrvgClient:
         """Current state of every device that has ever reported."""
         return await self._get("/api/v1/vehicle")
 
-    async def async_get_history(self, device: str, since_ms: int | None = None) -> dict[str, Any]:
-        """History for one device, already clamped to the plan's retention and resolution."""
-        params = {"device": device}
-        if since_ms is not None:
-            params["since"] = str(since_ms)
-        return await self._get("/api/v1/history", params)
+    # There is deliberately NO history client here. `GET /api/v1/history` exists in the cloud
+    # API and serves scripts and dashboards, but this component has no use for it: Home
+    # Assistant records its own history from install, and there is no numeric entity here to
+    # backfill — the vendor-shaped `extra` map is exposed as attributes rather than entities
+    # precisely because its units are unknowable. A wrapper with no caller but its own tests is
+    # worse than plain dead code, because the tests make it look exercised.

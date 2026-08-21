@@ -35,25 +35,6 @@ async def test_reads_a_vehicle_and_sends_the_token(hass, aioclient_mock) -> None
     assert url.query["vid"] == VID
 
 
-async def test_history_passes_device_and_since(hass, aioclient_mock) -> None:
-    aioclient_mock.get(f"{HOST}/api/v1/history", json={"device": "bilge", "samples": []})
-    await client(hass).async_get_history("bilge", since_ms=1_000)
-
-    _method, url, _data, _headers = aioclient_mock.mock_calls[0]
-    assert url.query["device"] == "bilge"
-    assert url.query["since"] == "1000"
-
-
-async def test_omits_since_when_not_asked_for(hass, aioclient_mock) -> None:
-    aioclient_mock.get(f"{HOST}/api/v1/history", json={"device": "bilge", "samples": []})
-    await client(hass).async_get_history("bilge")
-
-    _method, url, _data, _headers = aioclient_mock.mock_calls[0]
-    assert "since" not in url.query
-
-
-# 401 is BOTH "wrong token" and "unknown vehicle" — the API refuses to tell them apart so it cannot
-# be used to enumerate vehicle ids. For a client they mean the same thing anyway: ask the user again.
 async def test_401_is_an_auth_error(hass, aioclient_mock) -> None:
     aioclient_mock.get(VEHICLE_URL, status=401, json={"error": "unauthorized"})
     with pytest.raises(BrvgAuthError):
