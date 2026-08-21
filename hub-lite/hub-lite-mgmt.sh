@@ -16,9 +16,17 @@
 #   POST ?action=command&cmd=<verb>  → one ALLOWLISTED verb, run now (the cloud verb set exactly)
 #   POST ?action=lockdown            → apply, with the per-MAC allow list the cloud verb cannot carry
 #
-# AUTH is the router's own management key (hubLiteKey.ts), presented as `x-brvg-key`. One secret,
-# one router, one privilege level — the app fetches it from the worker over its normal
+# AUTH is the router's own management key (hubLiteKey.ts), presented as `Authorization: Bearer`.
+# One secret, one router, one privilege level — the app fetches it from the worker over its normal
 # Firebase-authed channel and the user never sees it.
+#
+# ⚠️ WHY `Authorization` AND NOT A CUSTOM HEADER. The first cut used `x-brvg-key`, matching the full
+# hub. It never worked, and could not: **uhttpd hands a CGI only a fixed whitelist of headers**, and
+# custom `X-*` ones are not on it. Verified on the bench (GL-X750, uhttpd 2022-10-31, 2026-08-21) —
+# `envdump` under uhttpd sees exactly HTTP_ACCEPT, HTTP_HOST, HTTP_USER_AGENT, HTTP_AUTHORIZATION,
+# HTTP_COOKIE, HTTP_REFERER and CONTENT_TYPE. `x-brvg-key` arrived as nothing at all, so every
+# request authenticated as anonymous and was refused. A full hub is a Rust server and can read any
+# header it likes; a CGI cannot. Do not "restore consistency" with the hub by changing this back.
 #
 # ⚠️ NOT A TUNNEL, for the same reason the cloud queue is not one: `command` takes a verb off a
 # fixed list and nothing else, and `lockdown` takes booleans and hardware addresses that are
@@ -29,7 +37,23 @@
 CONF="${BRVG_HUB_LITE_CONF:-/etc/brvg-hub-lite.conf}"
 BIN="${BRVG_HUB_LITE_BIN:-/usr/bin/brvg-hub-lite}"
 
-reply() { printf 'Status: %s\r\nContent-Type: application/json\r\n\r\n%s\r\n' "$1" "$2"; }
+# ⚠️ A CGI Status line MUST carry its reason phrase. Bench-verified on the same box: `Status: 401`
+# alone is ignored by uhttpd and the response goes out as **200 OK** with the error body — so a
+# refusal would read to any client as a success carrying strange JSON. `Status: 401 Unauthorized`
+# is honoured. This mapping exists so no caller can pass a bare code by accident.
+reason() {
+  case "$1" in
+    200) echo '200 OK' ;;
+    400) echo '400 Bad Request' ;;
+    401) echo '401 Unauthorized' ;;
+    404) echo '404 Not Found' ;;
+    500) echo '500 Internal Server Error' ;;
+    503) echo '503 Service Unavailable' ;;
+    *)   echo "$1 Error" ;;
+  esac
+}
+
+reply() { printf 'Status: %s\r\nContent-Type: application/json\r\n\r\n%s\r\n' "$(reason "$1")" "$2"; }
 die()   { reply "$1" "{\"error\":\"$2\"}"; exit 0; }
 
 # shellcheck disable=SC1090
@@ -39,7 +63,7 @@ die()   { reply "$1" "{\"error\":\"$2\"}"; exit 0; }
 # has no way to tell a member from a stranger on the marina Wi-Fi, and "fail open" is the wrong
 # answer to that question.
 [ -n "${MGMT_KEY:-}" ] || die 503 "this hub-lite has no management key yet"
-[ "${HTTP_X_BRVG_KEY:-}" = "$MGMT_KEY" ] || die 401 "unauthorized"
+[ "${HTTP_AUTHORIZATION:-}" = "Bearer $MGMT_KEY" ] || die 401 "unauthorized"
 
 # ---- request parsing -------------------------------------------------------------------------
 # Only the three names below are ever read out of the query string, and each is filtered to the
@@ -74,7 +98,7 @@ case "$method:$action" in
   GET:status)
     STATE="${BRVG_HUB_LITE_STATE:-/tmp/brvg-hub-lite.state}"
     if [ -r "$STATE" ]; then
-      printf 'Status: 200\r\nContent-Type: application/json\r\n\r\n'
+      printf 'Status: 200 OK\r\nContent-Type: application/json\r\n\r\n'
       cat "$STATE"
     else
       # Reachable and honest: the hub-lite is up, it just has not composed a report yet (a fresh
@@ -99,7 +123,14 @@ case "$method:$action" in
     [ -n "$cmd" ] || die 400 "cmd required"
     load_lib
     run_commands "lan:$cmd" >/dev/null 2>&1
-    reply 200 "{\"status\":\"ok\",\"ran\":\"$cmd\",\"door\":\"lan\"}"
+    # Ask the DAEMON to report again. A verb's real work (uci, AT, reboot) happened above in this
+    # process, but the follow-up report cannot: FOLLOWUP_REPORT is a variable in a process that is
+    # about to exit. Excluded for the verbs that are about to take the uplink or the binary away —
+    # a follow-up send would only fail. See HUB_LITE_FOLLOWUP in brvg-hub-lite.sh.
+    _fu=1
+    case "$cmd" in reboot|reboot_modem|self_update|rollback_agent) _fu=0 ;; esac
+    [ "$_fu" = "1" ] && : > "${BRVG_HUB_LITE_FOLLOWUP:-/tmp/brvg-hub-lite.followup}"
+    reply 200 "{\"status\":\"ok\",\"ran\":\"$cmd\",\"door\":\"lan\",\"followup\":$_fu}"
     ;;
 
   # ---- apply lockdown, with the allow list -----------------------------------------------------

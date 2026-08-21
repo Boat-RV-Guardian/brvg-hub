@@ -664,3 +664,16 @@ esac
 check "write_state: one object, version + timestamp + the reported values" "ok" "$r"
 check "write_state: no temp file left behind" "1" "$(ls "$_SD" | wc -l | tr -d ' ')"
 rm -rf "$_SD"
+
+# --- state_pairs must not duplicate `av` (real bench capture, 2026-08-21) ---
+# write_state puts `av` in the object header, and push_modem's param string carries it too, so the
+# first live capture off the GL-X750 had TWO "av" keys in one object.
+out=$(state_pairs "modem.measurement" "up=1&av=0.14.1&rsrp=-107")
+check "state: av is dropped from the params — the header already has it" '"up":"1","rsrp":"-107"' "$out"
+
+_SD2=$(mktemp -d)
+HUB_LITE_STATE="$_SD2/state"
+write_state "modem.measurement" "up=1&av=9.9.9&rsrp=-107"
+check "write_state: exactly one av in the object" "1" "$(tr ',' '\n' < "$HUB_LITE_STATE" | grep -c '"av"')"
+check "write_state: and it is the header's version, not the param's" "1" "$(grep -c "\"av\":\"$HUB_LITE_VERSION\"" "$HUB_LITE_STATE")"
+rm -rf "$_SD2"
