@@ -11,9 +11,9 @@ name: home-assistant
 on:
   push:
     branches: [main]
-    paths: ['custom_components/**', '.github/workflows/home-assistant.yml', 'hacs.json']
+    paths: ['custom_components/**', 'tests/**', '.github/workflows/home-assistant.yml', 'hacs.json', 'pytest.ini', 'requirements_test.txt']
   pull_request:
-    paths: ['custom_components/**', '.github/workflows/home-assistant.yml', 'hacs.json']
+    paths: ['custom_components/**', 'tests/**', '.github/workflows/home-assistant.yml', 'hacs.json', 'pytest.ini', 'requirements_test.txt']
 
 jobs:
   hassfest:
@@ -42,5 +42,17 @@ jobs:
         with:
           python-version: '3.13'
       - run: pipx install ruff
-      - run: ruff check custom_components
-      - run: ruff format --check custom_components
+      - run: ruff check custom_components tests
+      - run: ruff format --check custom_components tests
+
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements_test.txt
+      # pytest-homeassistant-custom-component pulls in a real Home Assistant, so these are not mocks
+      # of HA — the config flow, the coordinator and the entities run inside the actual thing.
+      - run: pytest

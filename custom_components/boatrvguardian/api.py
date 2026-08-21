@@ -65,6 +65,12 @@ class BrvgClient:
                     raise BrvgRateLimited(int(res.headers.get("Retry-After", "60") or 60))
                 res.raise_for_status()
                 return await res.json()
+        except TimeoutError as err:
+            # asyncio.TimeoutError is the builtin TimeoutError from 3.11, and it is NOT an
+            # aiohttp.ClientError — so the timeout set above would otherwise escape this client
+            # entirely and surface as an unhandled exception in the coordinator. A slow cloud is the
+            # single most likely failure this integration sees; it must be an ordinary UpdateFailed.
+            raise BrvgError(f"timed out reaching {self._host}") from err
         except aiohttp.ClientError as err:
             raise BrvgError(f"cannot reach {self._host}: {err}") from err
 
