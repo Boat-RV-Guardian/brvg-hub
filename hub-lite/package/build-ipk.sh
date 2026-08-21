@@ -38,6 +38,7 @@ install -m 0755 "$SRC/openwrt/etc/init.d/brvg-hub-lite" "$WORK/data/etc/init.d/b
 install -m 0755 "$SRC/setup-usb-gps.sh" "$WORK/data/usr/bin/brvg-setup-usb-gps"
 # Relay tier: the CGI webhook receiver (inert until HUB_LITE_ENABLED=1 in the config).
 install -m 0755 "$SRC/hub-lite-cgi.sh" "$WORK/data/www/brvg/cgi-bin/report"
+install -m 0755 "$SRC/hub-lite-mgmt.sh" "$WORK/data/www/brvg/cgi-bin/mgmt"
 
 # NOTE: no config file ships in the package. The config carries this device's token and is written
 # by the app at enrollment; packaging a placeholder would risk overwriting a live one on upgrade.
@@ -88,6 +89,7 @@ echo "2.0" > "$WORK/debian-binary"
 tar tzf "$WORK/data.tar.gz" | grep -q './usr/bin/brvg-hub-lite' || { echo "payload missing the hub-lite" >&2; exit 1; }
 tar tzf "$WORK/data.tar.gz" | grep -q './etc/init.d/brvg-hub-lite' || { echo "payload missing the init script" >&2; exit 1; }
 tar tzf "$WORK/data.tar.gz" | grep -q './www/brvg/cgi-bin/report' || { echo "payload missing the relay CGI" >&2; exit 1; }
+tar tzf "$WORK/data.tar.gz" | grep -q './www/brvg/cgi-bin/mgmt' || { echo "payload missing the management CGI" >&2; exit 1; }
 tar tzf "$WORK/control.tar.gz" | grep -q './control' || { echo "control archive incomplete" >&2; exit 1; }
 
 IPK="$OUT/${PKG}_${VERSION}_${ARCH}.ipk"

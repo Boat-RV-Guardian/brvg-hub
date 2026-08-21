@@ -169,6 +169,50 @@ confirm `uhttpd` is present on a FACTORY-RESET X750 (it was present on the bench
 had packages added); if not stock, it becomes a `Depends:` in the .ipk.
 
 
+## The LAN management door (hub-lite 0.14.0)
+
+The same uhttpd instance also serves **`hub-lite-mgmt.sh` at
+`http://<router>:8181/cgi-bin/mgmt`** — the door an app uses to manage this hub-lite while it is
+aboard, instead of driving the ROUTER VENDOR's API or waiting out the cloud command queue.
+
+Owner, 2026-08-21. The app had two ways to reach a router and neither of them was this one. It
+dialled the vendor API at the router's LAN address — which works only aboard, only on GL.iNet, and
+tells you nothing about the hub-lite — or it queued a verb in the cloud and waited for the next
+check-in. Aboard, on the same LAN as the box, the honest thing is to ask the hub-lite and get an
+answer now.
+
+| Call | What it does |
+| --- | --- |
+| `GET  ?action=status` | The last telemetry this hub-lite composed, verbatim from its state file |
+| `GET  ?action=lockdown` | `uci show firewall` for our rules, in the text the app's parser expects |
+| `POST ?action=command&cmd=<verb>` | ONE allowlisted verb, run now — the cloud verb set exactly |
+| `POST ?action=lockdown&catch=0\|1` | Apply, with the per-MAC allow list the cloud verb cannot carry |
+
+**Auth** is the router's own management key (`MGMT_KEY` in the config), presented as `x-brvg-key`.
+The hub-lite fetches it from `/api/agent/mgmt-key` with the device token it already has, so a box
+enrolled before 0.14.0 picks its key up on the next modem tick with nothing to re-install. With no
+key on the box the door is **shut**, not open: a hub-lite that has never reached the worker cannot
+tell a member from a stranger on the marina Wi-Fi.
+
+⚠️ **A hub-lite does NOT get the vehicle's per-member key set** the way a full hub does
+(`/api/hub/keys` refuses a router's token on purpose). That set is every member's LAN management
+access and belongs on a host that can resolve roles; this is a router in a locker. One key, one
+router, one privilege level — and the worker gates issuing it at the same boundary as
+`/api/agent/command`.
+
+**Not a tunnel**, for the same reason the cloud queue is not one: `command` takes a verb off the
+allowlist `run_commands` already owns (so the two doors can never diverge about what a hub-lite
+will do), and `lockdown` takes a boolean and hardware addresses that are validated before they
+reach a `uci` argument. This REPLACES the app SSH-ing a generated `uci` script in as root, which is
+why `valid_mac` and the body filter are the interesting part of the file rather than an
+afterthought.
+
+**Status is served from a file, never re-collected.** `write_state` in the reporting path writes
+what it just told the cloud to `/tmp/brvg-hub-lite.state`, and the CGI cats it. Re-collecting in
+the CGI would contend with the main loop for the AT port, spend modem time on every page view, and
+let the two paths disagree about the same instant.
+
+
 ## Hub watchdog — failing open, except in bandwidth saver mode
 
 Owner decisions 2026-08-13 + 2026-08-17. **`BANDWIDTH_SAVER=1` disables the watchdog entirely and

@@ -26,8 +26,14 @@
 # told to update and WHEN (staged rollout). The previous hub-lite is kept and automatically restored
 # if the new one cannot even report its own version.
 
-HUB_LITE_VERSION="0.13.0"
+HUB_LITE_VERSION="0.14.0"
 HUB_LITE_BACKUP="/etc/brvg-hub-lite.prev"
+
+# The LAST telemetry this hub-lite composed, as JSON, for the LAN management door to serve
+# (hub-lite-mgmt.sh). Written by the same code that reports to the cloud, so the two can never
+# disagree — and read rather than re-collected, so a status call never touches the AT port while
+# the main loop is mid-read. tmpfs: it is a cache of something the cloud already has.
+HUB_LITE_STATE="${BRVG_HUB_LITE_STATE:-/tmp/brvg-hub-lite.state}"
 
 
 # --- Pure parsers (stdin → stdout; empty output = no data) -------------------------------------
@@ -530,6 +536,68 @@ build_report_url() {
   fi
 }
 
+# --- LAN management door: shared state -----------------------------------------------------------
+# The app talks to a hub-lite over HTTP on the LAN (uhttpd CGI, hub-lite-mgmt.sh) and falls back to
+# the cloud command queue when it is not aboard. Both doors must describe the SAME router, so the
+# reporting path writes what it just said into a state file and the CGI serves that file verbatim.
+# Re-collecting in the CGI was the alternative and is worse in three ways: it would contend with
+# this loop for the AT port, it would spend modem time on every page view, and the two paths could
+# then disagree about the same instant.
+
+# $1 = event name ("modem.measurement"), $2 = the urlencoded param string that was reported.
+# Emits `"key":"value"` pairs; every value is quoted because a shell cannot tell a number from a
+# string here and the app's parser already coerces (parseCachedModem).
+state_pairs() {
+  printf '%s' "$2" | tr '&' '\n' | awk -F= '
+    $1 != "" && $2 != "" {
+      gsub(/%20/, " ", $2); gsub(/"/, "", $2); gsub(/\\/, "", $2)
+      printf "%s\"%s\":\"%s\"", (n++ ? "," : ""), $1, $2
+    }'
+}
+
+write_state() {
+  # $1 = event name, $2 = param string. Written to a temp file and moved into place so a reader
+  # never sees a half-written object.
+  _sf="${HUB_LITE_STATE}.$$"
+  {
+    printf '{"v":1,"event":"%s","ts":%s,"av":"%s"' "$1" "$(date +%s)" "$HUB_LITE_VERSION"
+    _pairs=$(state_pairs "$1" "$2")
+    [ -n "$_pairs" ] && printf ',%s' "$_pairs"
+    printf '}\n'
+  } > "$_sf" 2>/dev/null && mv "$_sf" "$HUB_LITE_STATE" 2>/dev/null
+  rm -f "$_sf" 2>/dev/null
+}
+
+# --- LAN management door: the key ----------------------------------------------------------------
+# One secret per ROUTER, minted and held by the worker (brvg-cloud-server/src/hubLiteKey.ts). We
+# fetch it with the device token we already have, so a box enrolled before this feature existed
+# picks its key up on the next tick with nothing to re-install and no re-enrollment.
+#
+# ⚠️ A hub-lite deliberately does NOT get the vehicle's per-member key set the way a full hub does.
+# That set is every member's LAN management access and belongs on a host that can resolve roles;
+# this is a router in a locker. One key, one router, one privilege level.
+fetch_mgmt_key() {
+  [ -n "${MGMT_KEY:-}" ] && return 0
+  [ -n "${DEVICE_TOKEN:-}" ] || return 1        # the legacy VEHICLE_KEY path cannot ask for one
+  _k=$(curl -fsS --max-time 10 \
+    "${WORKER_URL}/api/agent/mgmt-key?vid=${VID}&device=${DEVICE_ID}&t=${DEVICE_TOKEN}" 2>/dev/null \
+    | sed -n 's/.*"key":"\([0-9a-f]*\)".*/\1/p')
+  case "$_k" in
+    ????????????????????????????????????????????????????????????????) : ;;   # exactly 64 hex
+    *) return 1 ;;
+  esac
+  MGMT_KEY="$_k"
+  if [ -f "$CONF" ]; then
+    _tmp="${CONF}.$$"
+    grep -vE '^[[:space:]]*MGMT_KEY=' "$CONF" > "$_tmp" 2>/dev/null || true
+    printf 'MGMT_KEY=%s\n' "$MGMT_KEY" >> "$_tmp"
+    chmod 600 "$_tmp" 2>/dev/null
+    mv "$_tmp" "$CONF"
+  fi
+  log "management key stored — the app can now reach this hub-lite directly on the LAN"
+  return 0
+}
+
 # Commands acknowledged on the NEXT report (Phase B — see the worker's agentCommands.ts).
 PENDING_ACK=""
 
@@ -796,6 +864,97 @@ apply_lockdown() {
   return 0
 }
 
+# --- Lockdown: the LAN door's richer half --------------------------------------------------------
+# `apply_lockdown` above is the CLOUD verb: argument-free by design, so it can only ever express
+# the no-allows shape. The LAN door is authenticated by the management key and can carry the
+# per-MAC allow list, which is what the app needed SSH for until now (src-tauri/src/lockdown.rs).
+#
+# ⚠️ THIS REPLACES A REMOTE SHELL WITH A TYPED CALL, so the validation below is the whole point:
+# the app used to generate a uci script and pipe it into `ssh root@router`. Here a MAC that is not
+# a MAC is rejected before it reaches a uci argument, and there is no path by which a caller's
+# string becomes a command.
+
+# PURE: is this a hardware address? Rejects everything else, including the empty string.
+valid_mac() {
+  case "$1" in
+    [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Most rules one apply may write. Mirrors MAX_ALLOW_MACS in the app's Rust: a vessel has ~a dozen
+# devices, and far past that is a bug rather than a boat.
+LOCKDOWN_MAX_MACS=64
+
+# What the router is ACTUALLY enforcing, in the exact text the app's tested parser expects
+# (parseLockdownState in dashboard/src/utils/lockdownTransport.ts). Emitting the raw `uci show`
+# lines rather than a summary of our own is deliberate: it keeps ONE parser for both doors, so the
+# SSH path and this one can never disagree about what is applied.
+lockdown_show() {
+  command -v uci >/dev/null 2>&1 || { echo BRVG_LK_NONE; return 0; }
+  uci show firewall 2>/dev/null | grep -E 'brvg_lk|src_mac' || echo BRVG_LK_NONE
+}
+
+# $1 = 1 to write the catch-all, 0 to remove everything of ours. $2.. = allow MACs.
+# Rule ORDER is the mechanism: fw3/fw4 consult `config rule` entries before zone forwardings and in
+# creation order, so every ACCEPT is written before the REJECT that follows it.
+lockdown_apply_rules() {
+  command -v uci >/dev/null 2>&1 || return 1
+  _catch="$1"; shift
+  [ $# -le "$LOCKDOWN_MAX_MACS" ] || { log "lockdown: too many approved devices"; return 2; }
+  for _m in "$@"; do
+    # Never echo the offending value — a count is enough for a log, and the value came off the wire.
+    valid_mac "$_m" || { log "lockdown: an approved-device entry is not a hardware address"; return 2; }
+  done
+
+  release_lockdown >/dev/null 2>&1 || true   # a full rewrite of OUR rules; hand-written ones survive
+  if [ "$_catch" = "1" ]; then
+    _guest=0
+    uci show firewall 2>/dev/null | grep -q "name='guest'" && _guest=1
+    _i=0
+    for _m in "$@"; do
+      _n=$(uci add firewall rule) || return 1
+      uci set "firewall.$_n.name=brvg_lk_allow_$_i"
+      uci set "firewall.$_n.src=lan"
+      uci set "firewall.$_n.dest=wan"
+      uci set "firewall.$_n.src_mac=$_m"
+      uci set "firewall.$_n.target=ACCEPT"
+      uci set "firewall.$_n.proto=all"
+      if [ "$_guest" = "1" ]; then
+        _n=$(uci add firewall rule) || return 1
+        uci set "firewall.$_n.name=brvg_lk_allow_g$_i"
+        uci set "firewall.$_n.src=guest"
+        uci set "firewall.$_n.dest=wan"
+        uci set "firewall.$_n.src_mac=$_m"
+        uci set "firewall.$_n.target=ACCEPT"
+        uci set "firewall.$_n.proto=all"
+      fi
+      _i=$((_i + 1))
+    done
+    # The catch-alls go LAST — uci preserves creation order, and the rules run in it.
+    _n=$(uci add firewall rule) || return 1
+    uci set "firewall.$_n.name=brvg_lk_deny"
+    uci set "firewall.$_n.src=lan"
+    uci set "firewall.$_n.dest=wan"
+    uci set "firewall.$_n.target=REJECT"
+    uci set "firewall.$_n.proto=all"
+    if [ "$_guest" = "1" ]; then
+      _n=$(uci add firewall rule) || return 1
+      uci set "firewall.$_n.name=brvg_lk_deny_guest"
+      uci set "firewall.$_n.src=guest"
+      uci set "firewall.$_n.dest=wan"
+      uci set "firewall.$_n.target=REJECT"
+      uci set "firewall.$_n.proto=all"
+    fi
+  fi
+  uci commit firewall
+  /etc/init.d/firewall reload >/dev/null 2>&1 || true
+  # Bench 2026-08-13: rules take effect ~10 s AFTER reload returns. Report state only once what we
+  # report is what the router is doing.
+  sleep 11
+  return 0
+}
+
 watch_hub() {
   # BANDWIDTH SAVER MODE FAILS CLOSED (owner, 2026-08-17): when lockdown exists to control
   # metered-SIM spend, a dead hub must NOT release it — silence until the connectivity-offline
@@ -984,6 +1143,9 @@ push_modem() {
   # are unmanageable without the version: you cannot decide who to update next if you cannot see
   # what is deployed.
   _p="$_p&av=$HUB_LITE_VERSION$(collect_wan_usage)"
+  # State BEFORE the send: what this router knows about itself is true whether or not the WAN is
+  # up, and the LAN door is exactly the door that still works when the cloud send fails.
+  write_state "modem.measurement" "$_p"
   send_event "modem.measurement" "$_p"
 }
 
@@ -1295,6 +1457,9 @@ main() {
     _lt_elapsed=$(( _lt_elapsed + GPS_INTERVAL ))
     if [ "$_elapsed" -ge "$MODEM_INTERVAL" ]; then
       push_modem
+      # No-op once we have a key. Here rather than at startup so a box that boots with no WAN still
+      # collects one the moment the uplink comes back.
+      [ "${HUB_LITE_ENABLED:-0}" = "1" ] && fetch_mgmt_key
       [ "${HUB_LITE_ENABLED:-0}" = "1" ] && drain_relay
       watch_hub
       _elapsed=0
