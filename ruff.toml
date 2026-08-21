@@ -1,0 +1,11 @@
+# Ruff settings for the Home Assistant integration. Home Assistant's own conventions, kept narrow:
+# this file must not start policing the TypeScript collectors' sibling directories.
+target-version = "py313"
+line-length = 100
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[lint.isort]
+force-sort-within-sections = true
+known-first-party = ["custom_components"]

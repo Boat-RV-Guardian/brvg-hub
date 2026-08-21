@@ -1,9 +1,9 @@
 """Alarm state, one binary sensor per device.
 
-The alarm/clear decision is NOT made here — the cloud reports `kind` on every device precisely so no
-client re-implements its event classifier. Two bugs in this platform's history came from a classifier
-that disagreed with itself; a Python copy of those regexes would be a third. If you are ever tempted
-to parse an event NAME in this file, the fix belongs in the API.
+The alarm/clear decision is NOT made here — the cloud reports `kind` on every device precisely
+so no client re-implements its event classifier. Two bugs in this platform's history came from a
+classifier that disagreed with itself; a Python copy of those regexes would be a third. If you are
+ever tempted to parse an event NAME in this file, the fix belongs in the API.
 """
 
 from __future__ import annotations
@@ -26,8 +26,9 @@ from .const import (
 )
 from .entity import BrvgEntity
 
-# Only where Home Assistant has a class that genuinely matches. Everything else is PROBLEM, which is
-# honest: a wrong device class renders a wrong icon and a wrong on/off vocabulary in every dashboard.
+# Only where Home Assistant has a class that genuinely matches. Everything else is PROBLEM,
+# which is honest: a wrong device class renders a wrong icon and a wrong on/off vocabulary in
+# every dashboard.
 DEVICE_CLASSES = {
     CATEGORY_FLOOD: BinarySensorDeviceClass.MOISTURE,
     CATEGORY_SHORE_POWER: BinarySensorDeviceClass.PLUG,

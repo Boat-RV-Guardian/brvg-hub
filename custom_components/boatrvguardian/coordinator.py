@@ -8,8 +8,8 @@ on how often to ask, and this class follows it.
 
 from __future__ import annotations
 
-import logging
 from datetime import timedelta
+import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry

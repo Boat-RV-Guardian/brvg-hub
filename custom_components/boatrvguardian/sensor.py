@@ -1,15 +1,15 @@
 """The last event each device reported, plus its telemetry as attributes.
 
 Deliberately ONE sensor per device rather than one per telemetry key. The `extra` map is
-vendor-shaped and open-ended — a Shelly voltmeter, an H&T probe and a LinkTap gateway do not agree on
-key names or units — so minting an entity per key would create entities that appear and vanish as
-hardware changes, with units this component would have to guess. Attributes carry the same data
-without inventing a schema nobody promised.
+vendor-shaped and open-ended — a Shelly voltmeter, an H&T probe and a LinkTap gateway do not
+agree on key names or units — so minting an entity per key would create entities that appear and
+vanish as hardware changes, with units this component would have to guess. Attributes carry the
+same data without inventing a schema nobody promised.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
@@ -73,5 +73,5 @@ class BrvgLastReportSensor(BrvgEntity, SensorEntity):
         at = self.device_data.get("at")
         if not isinstance(at, (int, float)) or at <= 0:
             return None
-        # The wire carries UTC epoch ms, never a formatted local string — the platform's time policy.
-        return datetime.fromtimestamp(at / 1000, tz=timezone.utc)
+        # The wire carries UTC epoch ms, never a formatted local string — the time policy.
+        return datetime.fromtimestamp(at / 1000, tz=UTC)

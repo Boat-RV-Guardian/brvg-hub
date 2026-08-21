@@ -1,0 +1,46 @@
+# Validation for the Home Assistant integration. Separate from ci.yml because it shares nothing with
+# the collectors — different language, different toolchain, and a push that only touches the hub
+# should not spend minutes on hassfest.
+#
+# hassfest is Home Assistant's OWN manifest/translation validator: it is what catches a bad
+# iot_class, a strings.json that has drifted from the entities, or a manifest key HA has since
+# renamed. HACS validation checks what the store requires of a repository. Between them they are the
+# gate this component would otherwise not have.
+name: home-assistant
+
+on:
+  push:
+    branches: [main]
+    paths: ['custom_components/**', '.github/workflows/home-assistant.yml', 'hacs.json']
+  pull_request:
+    paths: ['custom_components/**', '.github/workflows/home-assistant.yml', 'hacs.json']
+
+jobs:
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hacs/action@main
+        with:
+          category: integration
+          # This repo is not in the HACS default store — it is installed as a custom repository — so
+          # the brands check (which requires a PR against home-assistant/brands) would fail on
+          # something we have deliberately not done.
+          ignore: brands
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pipx install ruff
+      - run: ruff check custom_components
+      - run: ruff format --check custom_components

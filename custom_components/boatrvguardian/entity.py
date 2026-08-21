@@ -34,6 +34,6 @@ class BrvgEntity(CoordinatorEntity[BrvgCoordinator]):
 
     @property
     def available(self) -> bool:
-        # A device that has dropped out of the vehicle payload is not "off", it is unknown — and on a
-        # boat that distinction is the whole point: a silent bilge sensor must never read as "dry".
+        # A device that has dropped out of the vehicle payload is not "off", it is unknown — and
+        # on a boat that distinction is the point: a silent bilge sensor must never read as "dry".
         return super().available and self.coordinator.device(self._device_id) is not None
