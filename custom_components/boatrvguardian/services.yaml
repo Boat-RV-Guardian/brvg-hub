@@ -1,0 +1,24 @@
+open_valve:
+  name: Open valve
+  description: >-
+    Turn the water on for a limited time. The duration is required — the valve is never opened
+    without one — and the cloud shortens it further if the vehicle owner has set a lower maximum.
+  fields:
+    entry_id:
+      name: Vehicle
+      description: Which configured vehicle to open. Omit when only one is set up.
+      required: false
+      selector:
+        config_entry:
+          integration: boatrvguardian
+    duration_minutes:
+      name: Duration
+      description: How long the valve may stay open.
+      required: true
+      example: 20
+      selector:
+        number:
+          min: 1
+          max: 1439
+          unit_of_measurement: minutes
+          mode: box

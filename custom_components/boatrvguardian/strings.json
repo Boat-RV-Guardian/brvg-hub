@@ -13,7 +13,9 @@
       "reauth_confirm": {
         "title": "Token no longer works",
         "description": "The integration token was rotated or revoked. Create a new one in the app and paste it here.",
-        "data": { "token": "Integration token" }
+        "data": {
+          "token": "Integration token"
+        }
       }
     },
     "error": {
@@ -28,10 +30,39 @@
     }
   },
   "entity": {
-    "binary_sensor": { "alarm": { "name": "Alarm" } },
+    "binary_sensor": {
+      "alarm": {
+        "name": "Alarm"
+      }
+    },
     "sensor": {
-      "last_event": { "name": "Last event" },
-      "last_report": { "name": "Last report" }
+      "last_event": {
+        "name": "Last event"
+      },
+      "last_report": {
+        "name": "Last report"
+      }
+    },
+    "button": {
+      "close_valve": {
+        "name": "Close water valve"
+      }
+    }
+  },
+  "services": {
+    "open_valve": {
+      "name": "Open valve",
+      "description": "Turn the water on for a limited time. The duration is required — the valve is never opened without one.",
+      "fields": {
+        "entry_id": {
+          "name": "Vehicle",
+          "description": "Which configured vehicle to open. Omit when only one is set up."
+        },
+        "duration_minutes": {
+          "name": "Duration",
+          "description": "How long the valve may stay open."
+        }
+      }
     }
   }
 }

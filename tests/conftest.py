@@ -25,6 +25,20 @@ VEHICLE_URL = f"{HOST}/api/v1/vehicle"
 HISTORY_URL = f"{HOST}/api/v1/history"
 
 
+async def setup_integration(hass, aioclient_mock, payload=None):
+    """Configure one vehicle and return its entry, with the vehicle read already mocked."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.boatrvguardian.const import DOMAIN
+
+    aioclient_mock.get(VEHICLE_URL, json=payload if payload is not None else vehicle_payload())
+    entry = MockConfigEntry(domain=DOMAIN, data=ENTRY_DATA, unique_id=VID)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    return entry
+
+
 @pytest.fixture(autouse=True)
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Load the component from custom_components/ rather than HA's own tree."""
@@ -39,6 +53,8 @@ def vehicle_payload(**over: Any) -> dict[str, Any]:
         "vehicleType": "boat",
         "tier": "premium",
         "resolutionSec": 30,
+        "scope": "read",
+        "valve": {"present": False},
         "devices": [
             {
                 "id": "bilge",

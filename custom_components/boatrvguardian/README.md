@@ -35,6 +35,33 @@ For every device aboard:
 A device that stops appearing goes **unavailable** rather than reading "clear". On a boat that
 distinction matters: a silent bilge sensor must never look like a dry bilge.
 
+## Controlling the water valve
+
+What a token may do is chosen **when you create it**, in the app:
+
+| Scope | What appears in Home Assistant |
+| --- | --- |
+| Status only | Sensors. Nothing that changes anything |
+| Status + close | A **Close water valve** button |
+| Status + open and close | The button, plus the `boatrvguardian.open_valve` action |
+
+If your token is status-only, no valve control appears at all — rather than a button that would be
+refused. Widening it means creating a **new** token: the old one loses the power instead of gaining
+it, so a token you gave to something you no longer trust cannot quietly become more powerful.
+
+Opening always carries a time limit. There is no "open indefinitely", by design, and the vehicle's
+owner may have set a maximum shorter than what you ask for.
+
+```yaml
+action: boatrvguardian.open_valve
+data:
+  duration_minutes: 20
+```
+
+**Closing is the safe direction and is treated that way throughout** — it works on any paid plan,
+nothing rate-limits it, and if it fails you get an error rather than silence. A close that failed
+quietly is the worst outcome there is here: you would walk away believing the water was off.
+
 ## How often it polls
 
 It doesn't ask you, and it doesn't guess. Your plan has a telemetry resolution, the cloud reports it
