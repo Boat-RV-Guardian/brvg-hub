@@ -39,3 +39,14 @@ KIND_ALARM: Final = "alarm"
 KIND_CLEAR: Final = "clear"
 KIND_TELEMETRY: Final = "telemetry"
 KIND_STATE: Final = "state"
+
+# Scopes, as the cloud reports them on every read. A client is TOLD its scope so it can render only
+# what it may actually do — reporting is not granting, and every command is re-checked server-side
+# against the stored value.
+SCOPE_READ: Final = "read"
+SCOPE_SAFE: Final = "safe"
+SCOPE_CONTROL: Final = "control"
+
+SERVICE_OPEN_VALVE: Final = "open_valve"
+ATTR_DURATION_MINUTES: Final = "duration_minutes"
+ATTR_ENTRY_ID: Final = "entry_id"
