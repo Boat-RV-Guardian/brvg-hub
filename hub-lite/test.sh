@@ -525,11 +525,11 @@ echo "all hub-lite parser tests passed"
 
 # lt_parse_status
 out=$(printf '{"cmd":3,"dev_stat":[{"is_watering":1,"volume":0.63,"remain_duration":79940}]}' | lt_parse_status gal)
-check "lt parse: watering, gal→L conversion (0.63 gal = 2.385 L)" "1 2.385 79940" "$out"
+check "lt parse: watering, gal→L conversion (0.63 gal = 2.385 L)" "1 2.385 79940 0.000" "$out"
 out=$(printf '{"is_watering":0,"volume":15886307.00}' | lt_parse_status gal)
-check "lt parse: the idle garbage latch reads as no volume" "0 0.000 " "$out"
+check "lt parse: the idle garbage latch reads as no volume" "0 0.000  0.000" "$out"
 out=$(printf '<html><body><!--#RET-->{"is_watering":"1","volume":2,"remain_duration":60}</body></html>' | lt_parse_status L)
-check "lt parse: HTML wrap + string flag + litre unit" "1 2.000 60" "$out"
+check "lt parse: HTML wrap + string flag + litre unit" "1 2.000 60 0.000" "$out"
 
 # lt_decide — the decision table, mirroring cycle.test.ts
 check "decide: idle + watering = adopt (manual press IS a Normal Run)" "adopt" "$(lt_decide idle 1 0.5 100 "" 0 86400)"
@@ -538,6 +538,20 @@ check "decide: cap reached = cut" "cut" "$(lt_decide watering 1 100.2 100 "" 300
 check "decide: cap reached but stop already issued = none (no re-issue storm)" "none" "$(lt_decide watering 1 101 100 "volume_cap" 320 86400)"
 check "decide: under the cap = none" "none" "$(lt_decide watering 1 50 100 "" 300 86400)"
 check "decide: no cap (washdown shape) never cuts" "none" "$(lt_decide watering 1 5000 0 "" 300 7200)"
+# The lead-time cutoff — mirrors daemon cycle.rs cutoff_trigger_l. Numbers measured on MVP
+# 2026-08-22: 22.07 L/min (5.83 gal/min) x 8 s = ~2.94 L of overshoot.
+check "decide: leads the cap by the stop latency (fires BELOW the cap when flowing)" "cut" \
+  "$(lt_decide watering 1 35.0 37.85 "" 300 86400 22.07)"
+check "decide: same volume with NO speed does NOT cut early (degrades to old behaviour)" "none" \
+  "$(lt_decide watering 1 35.0 37.85 "" 300 86400 0)"
+check "decide: speed arg omitted entirely still behaves as before" "none" \
+  "$(lt_decide watering 1 35.0 37.85 "" 300 86400)"
+check "decide: a trickle barely leads — 39 L under a 40 L cap at 1 L/min is not yet a cut" "none" \
+  "$(lt_decide watering 1 38.7 40 "" 300 86400 1.0)"
+check "decide: cap smaller than the overshoot cuts at the first sign of flow" "cut" \
+  "$(lt_decide watering 1 0.1 1.0 "" 5 86400 22.07)"
+check "decide: no cap still never cuts however fast it flows" "none" \
+  "$(lt_decide watering 1 5000 0 "" 300 7200 22.07)"
 check "decide: closed after our stop = ended:volume_cap" "ended:volume_cap" "$(lt_decide watering 0 100.5 100 "volume_cap" 350 86400)"
 check "decide: THE BUG CASE — hardware cap stop inside one poll = ended:volume_cap, not timer" "ended:volume_cap" "$(lt_decide watering 0 100.3 100 "" 120 600)"
 check "decide: closed within a minute of duration = ended:timer" "ended:timer" "$(lt_decide watering 0 40 100 "" 590 600)"
@@ -555,6 +569,12 @@ lt_should_restart timer 0 && _r=yes || _r=no
 check "restart: disabled means disabled" "no" "$_r"
 
 # lt_start_body — cmd 6, duration seconds, volume_limit in the gateway unit
+# lt_parse_status now emits: watering volume remain SPEED (speed in L/min, gal converted)
+check "parse_status extracts speed and converts gal/min -> L/min" "1 15.142 270 22.069" \
+  "$(printf '%s' '{"is_watering":true,"volume":4.0,"remain_duration":270,"speed":5.83}' | lt_parse_status gal)"
+check "parse_status: absent speed is 0 (lead disabled, not corrupted)" "1 4.000 270 0.000" \
+  "$(printf '%s' '{"is_watering":true,"volume":4.0,"remain_duration":270}' | lt_parse_status litre)"
+
 check "lt_start_body shape" '{"cmd":6,"gw_id":"GW02","dev_id":"aaaabbbbccccdddd","duration":86400,"volume_limit":26.42}' \
   "$(lt_start_body GW02 aaaabbbbccccdddd 86400 26.42)"
 

@@ -135,6 +135,20 @@ pub fn build_get_configuration(gw: &Gateway) -> serde_json::Value {
     serde_json::json!({ "cmd": 16, "gw_id": gw.gw_id })
 }
 
+/// Instantaneous flow in LITRES PER MINUTE from a status payload.
+///
+/// `speed` is reported in the GATEWAY's configured unit per minute — gal/min on a `gal` gateway —
+/// exactly like `volume`, so it converts the same way. Feeds the cutoff's lead time
+/// (`cycle::cutoff_trigger_l`), and returns 0 for anything missing, non-finite or negative, which
+/// disables the lead rather than corrupting it.
+pub fn flow_rate_litres_per_min(data: &serde_json::Value, unit: VolUnit) -> f64 {
+    data.get("speed")
+        .and_then(|v| v.as_f64())
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(|s| unit.to_litres(s))
+        .unwrap_or(0.0)
+}
+
 /// Start a cycle. `duration` is SECONDS.
 ///
 /// ⚠️ `volume_limit` IS SENT BUT MUST NOT BE TRUSTED — measured: "LinkTap hardware often ignores
