@@ -106,7 +106,8 @@ impl Runtime {
         let volume_l = linktap::cycle_volume_litres(data, unit);
         let remain = data.get("remain_duration").and_then(|v| v.as_f64()).filter(|r| *r > 0.0).map(|r| r as u64);
 
-        let obs = cycle::Observation { at: now_ms, watering, volume_l, remain_secs: remain };
+        let speed_lpm = linktap::flow_rate_litres_per_min(data, unit);
+        let obs = cycle::Observation { at: now_ms, watering, volume_l, remain_secs: remain, speed_lpm };
         let r = cycle::step(&track.state, obs, &profile);
         track.state = r.state;
 

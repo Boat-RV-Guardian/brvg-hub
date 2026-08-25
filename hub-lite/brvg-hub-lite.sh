@@ -1244,23 +1244,39 @@ lt_parse_status() {
       if (match(buf, /"remain_duration":[[:space:]]*[0-9.]+/)) {
         r = substr(buf, RSTART, RLENGTH); sub(/.*:/, "", r); rem = int(r + 0)
       }
-      printf "%d %.3f %s\n", w, vol, rem
+      # Instantaneous flow, same unit as volume (gateway unit per MINUTE) -> L/min. Feeds the
+      # cutoff lead time; 0 for missing/absurd, which simply disables the lead.
+      spd = 0
+      if (match(buf, /"speed":[[:space:]]*[0-9.]+/)) {
+        sp = substr(buf, RSTART, RLENGTH); sub(/.*:/, "", sp); spd = sp + 0
+        if (spd < 0 || spd > 100000) spd = 0
+        else if (unit == "gal") spd = spd * 3.785411784
+      }
+      printf "%d %.3f %s %.3f\n", w, vol, rem, spd
     }'
 }
 
 # The decision table, PURE — mirrors cycle.ts step() + shouldAutoRestart(). Args:
 #   $1 prev ("idle" | "watering"), $2 now-watering (0/1), $3 volumeL, $4 capL (0 = none),
-#   $5 stop_issued ("" | volume_cap | manual | flood_shutoff), $6 elapsedSecs, $7 durationSecs
+#   $5 stop_issued ("" | volume_cap | manual | flood_shutoff), $6 elapsedSecs, $7 durationSecs,
+#   $8 speedLpm (OPTIONAL, 0/absent = no lead)
 # Prints ONE word: adopt | cut | none | ended:<reason>
+#
+# ⚠️ THE CUT FIRES EARLY, BY THE STOP LATENCY — mirrors daemon cycle.rs `cutoff_trigger_l`, and the
+# two must not drift. The hardware ignores `volume_limit` (proven inert on GW-02 2026-08-22), so
+# this cutoff is the only volume enforcement there is; firing it AT the cap overshoots by whatever
+# still flows while the stop lands — measured 0.79 gal at 5.83 gal/min, i.e. ~8 s. Lead by
+# `speed x 8s`, clamped at 0, and fall back to the cap exactly when no speed is known.
 lt_decide() {
-  _prev="$1"; _now="$2"; _vol="$3"; _cap="$4"; _stop="$5"; _elapsed="$6"; _dur="$7"
+  _prev="$1"; _now="$2"; _vol="$3"; _cap="$4"; _stop="$5"; _elapsed="$6"; _dur="$7"; _speed="${8:-0}"
   if [ "$_prev" = "idle" ]; then
     [ "$_now" = "1" ] && { echo adopt; return; }
     echo none; return
   fi
   if [ "$_now" = "1" ]; then
-    # The software cutoff: the hardware "often ignores volume limits passed to cmd 6".
-    if [ -z "$_stop" ] && awk -v v="$_vol" -v c="$_cap" 'BEGIN{exit !(c > 0 && v >= c)}'; then
+    # The software cutoff, fired EARLY by the stop latency (see the note above the function).
+    if [ -z "$_stop" ] && awk -v v="$_vol" -v c="$_cap" -v s="$_speed" \
+        'BEGIN{ if (c <= 0) exit 1; t = c; if (s > 0) { t = c - s * (8.0/60.0); if (t < 0) t = 0 } exit !(v >= t) }'; then
       echo cut; return
     fi
     echo none; return
@@ -1393,7 +1409,7 @@ linktap_tick() {
       -d "{\"cmd\":3,\"gw_id\":\"$LINKTAP_GW_ID\",\"dev_id\":\"$_d\"}" \
       "http://${LINKTAP_HOST}/api.shtml" 2>/dev/null) || continue
     set -- $(printf '%s' "$_reply" | lt_parse_status "$_unit")
-    _w="$1"; _volL="$2"
+    _w="$1"; _volL="$2"; _speedL="${4:-0}"
 
     _sf="$LT_STATE_DIR/$_d"
     _state=idle; _started=0; _stop=""
@@ -1401,7 +1417,7 @@ linktap_tick() {
     [ -f "$_sf" ] && . "$_sf"
     _elapsed=$(( $(date +%s) - _started ))
 
-    _act=$(lt_decide "$_state" "$_w" "$_volL" "$_capL" "$_stop" "$_elapsed" "$_dur")
+    _act=$(lt_decide "$_state" "$_w" "$_volL" "$_capL" "$_stop" "$_elapsed" "$_dur" "$_speedL")
     case "$_act" in
       adopt)
         # Manual press / external open IS a Normal Run with the profile cap (owner rule).
