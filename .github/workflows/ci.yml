@@ -68,7 +68,7 @@ jobs:
   # already-built release artifact.
   # WINDOWS IS A SEPARATE JOB BECAUSE THE DAEMON REPO SHIPS WINDOWS-ONLY CODE.
   #
-  # `brvg-hub-tray` draws in the notification area and drives schtasks, so none of it compiles on
+  # `brvg-hub-tray` draws in the notification area and drives the SCM (sc.exe), so none of it compiles on
   # the Linux leg below — it is a stub there. Without this job its first real compile would happen
   # inside a release, which is precisely the mistake that shipped a broken installer in
   # daemon-v0.3.0: the only gate was a Linux one, and the Windows-specific half went out unbuilt.

@@ -15,9 +15,9 @@
 ;   ... add /NOTRAY to any install to leave the notification-area monitor out
 ;
 ; EXIT CODES (the app branches on these, so do not renumber):
-;   0  installed, and VERIFIED - the binary is on disk and the task is registered
+;   0  installed, and VERIFIED - the binary is on disk and the service is registered
 ;   2  a hub was already running and its program file could not be replaced (try again)
-;   3  nothing usable was installed - almost always security software blocking the task or
+;   3  nothing usable was installed - almost always security software blocking the service or
 ;      quarantining the binary; see the self-check at the end of the Hub section
 
 Unicode true
@@ -26,15 +26,27 @@ Unicode true
 !include "LogicLib.nsh"
 
 !define HUB_NAME "Boat & RV Guardian Hub"
-!define TASK_NAME "BoatRVGuardianHub"
-; Admins+SYSTEM full control, BUILTIN\Users READ. Without the Users entry a standard user's app
-; cannot SEE the task and reports "not installed" over a running hub -- found live on CENTRAL,
-; 2026-08-19 (app #417). Keep this identical to hub_service.rs's TASK_SDDL.
-!define TASK_SDDL "O:BAD:(A;;FA;;;BA)(A;;FA;;;SY)(A;;GR;;;BU)"
+
+; THE HUB IS A REAL WINDOWS SERVICE, NOT A SCHEDULED TASK (owner ruling 2026-08-20: "i want you to
+; build it as a service no matter what, i don't like it as a scheduled task").
+;
+; ⚠️ THIS NAME IS A THREE-WAY CONTRACT and a mismatch is silent. It must equal:
+;   * SERVICE_NAME in daemon/src/win_service.rs  -- the SCM starts the binary, and the binary
+;     registers its control handler under this exact string. Wrong here and the service starts,
+;     never reports RUNNING, and the SCM kills it.
+;   * SERVICE_NAME in the APP's dashboard/src-tauri/src/hub_service.rs -- that is what `sc query`s
+;     to draw the Hub screen. Wrong here and the app manages a service the daemon never answers.
+!define SERVICE_NAME "BoatRVGuardianHub"
+!define SERVICE_DESC "Carries this vehicle's local work - gateway telemetry, local control and cloud reporting - even when nobody is signed in."
+
+; The scheduled task this installer used to create, kept ONLY so an upgrade removes it. A machine
+; that still carries it would otherwise end up with two persistence entries fighting over port
+; 8722. New installs never create a task.
+!define LEGACY_TASK_NAME "BoatRVGuardianHub"
 
 Name "${HUB_NAME}"
 OutFile "brvg-hub-windows-setup.exe"
-; The hub is a machine service: its binary and config live under ProgramData and its task runs as
+; The hub is a machine service: its binary and config live under ProgramData and its service runs as
 ; SYSTEM. There is no per-user variant to offer, so the installer simply requires admin.
 RequestExecutionLevel admin
 ; NO InstallDir HERE. $PROGRAMDATA IS NOT AN NSIS CONSTANT -- see .onInit, which sets $INSTDIR the
@@ -50,6 +62,7 @@ Var RbAuto
 Var RbManual
 Var ChkTray            ; the notification-area checkbox on the startup page
 Var Tray               ; "1" = install the tray monitor and start it with Windows
+Var StartMode          ; "auto" or "demand" -- the service start type, set at creation
 
 !define MUI_ABORTWARNING
 !define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfUninstalling
@@ -121,7 +134,7 @@ FunctionEnd
 Function .onInit
   ; ProgramData, correctly. NSIS reaches it as $APPDATA under the "all users" shell context -- there
   ; is no $PROGRAMDATA constant. The context is set once here and left set: this installer is
-  ; machine-wide by definition (RequestExecutionLevel admin, a SYSTEM task), so every shell folder
+  ; machine-wide by definition (RequestExecutionLevel admin, a LocalSystem service), so every shell folder
   ; it touches should be the machine-wide one.
   SetShellVarContext all
   StrCpy $INSTDIR "$APPDATA\BoatRVGuardian"
@@ -149,7 +162,7 @@ FunctionEnd
 
 Section "Hub" SecHub
   ; UPGRADING OVER A RUNNING HUB IS THE NORMAL CASE, NOT THE EDGE CASE.
-  ; The app installs a hub at this same path under this same task name, and re-running this
+  ; The app installs a hub at this same path under this same SERVICE name, and re-running this
   ; installer is how a repair or an upgrade happens. A running hub holds bin\brvg-hub.exe open, so
   ; File cannot overwrite it and the install fails at its very first instruction.
   ;
@@ -157,17 +170,32 @@ Section "Hub" SecHub
   ;   [System.IO.File]::OpenWrite("C:\ProgramData\BoatRVGuardian\bin\brvg-hub.exe")
   ;   -> "The process cannot access the file ... because it is being used by another process."
   DetailPrint "Stopping any hub that is already running..."
-  nsExec::ExecToLog 'schtasks /End /TN "${TASK_NAME}"'
+  nsExec::ExecToLog 'sc.exe stop "${SERVICE_NAME}"'
+  Pop $0
+  ; And the LEGACY scheduled task, on a machine upgrading from the pre-service hub. It holds the
+  ; same binary open, and leaving it would give the machine two things trying to run one hub.
+  nsExec::ExecToLog 'schtasks /End /TN "${LEGACY_TASK_NAME}"'
   Pop $0
 
-  ; /End only reaches a process the scheduler owns. A hub started by hand (brvg-hub --hub), or
-  ; orphaned when a task died badly, holds exactly the same lock and would still block the write.
+  ; `sc stop` only reaches a process the SCM owns. A hub started by hand (brvg-hub --hub), or
+  ; orphaned when a service died badly, holds exactly the same lock and would still block the write.
   ; So follow up unconditionally -- failure here is fine and expected when nothing is running.
   nsExec::ExecToLog 'taskkill /F /IM brvg-hub.exe /T'
   Pop $0
 
   ; Windows releases the file handle when the process is reaped, which is not synchronous with
   ; taskkill returning.
+  Sleep 1500
+
+  ; DELETE BEFORE CREATE, because `sc create` on an existing name fails with 1073 rather than
+  ; repairing it -- there is no /F equivalent. A re-install and an upgrade both land here, so this
+  ; is the normal path, not the edge case. `sc delete` on a service that is still RUNNING only
+  ; MARKS it for deletion and the name stays taken, which is why the stop and the taskkill above
+  ; come first and why the wait below is not optional.
+  nsExec::ExecToLog 'sc.exe delete "${SERVICE_NAME}"'
+  Pop $0
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "${LEGACY_TASK_NAME}"'
+  Pop $0
   Sleep 1500
 
   SetOutPath "$INSTDIR\bin"
@@ -184,90 +212,133 @@ Section "Hub" SecHub
   SetOverwrite on
 
   DetailPrint "Registering the hub's background service..."
-  ; ONSTART under SYSTEM: the boot-before-login shape. /F so a re-install repairs rather than fails.
   ;
-  ; Bare path, no quotes. This is a STYLE choice, not a correctness one -- do not build a rule on it.
+  ; ⚠️ THIS WAS `schtasks /Create /SC ONSTART` UNTIL NOW, AND THE CHANGE IS THE WHOLE POINT OF THIS
+  ; SECTION. Measured on CENTRAL 2026-08-19: Sophos Endpoint Defense flagged the schtasks call as
+  ; Persist_6a (MITRE T1053.005 - Scheduled Task persistence), blocked the task, and quarantined
+  ; bin\brvg-hub.exe about 14 seconds later. It keys on the SCHEDULED-TASK PATTERN, not on the
+  ; process chain -- proven by re-running the same install as a real service under the same active
+  ; Sophos, which went UNFLAGGED. A service is T1543.003, a different technique the same product
+  ; did not act on.
   ;
-  ; ⚠️ AN EARLIER VERSION OF THIS COMMENT CLAIMED, IN CAPITALS AND AS MEASURED FACT, that quoting
-  ; /TR made the task unrunnable. THAT WAS WRONG, and it shipped in daemon-v0.3.4. Retested on
-  ; CENTRAL 2026-08-20 by registering a task with a QUOTED path under a scratch name:
-  ;   <Command>"C:\ProgramData\BoatRVGuardian\bin\brvg-hub.exe"</Command>
-  ;   schtasks /Run -> exit 0, SUCCESS
-  ; A quoted <Command> runs. The app (hub_service.rs) has always produced one and its hub has always
-  ; started.
+  ; The app's own installer (dashboard/src-tauri/src/hub_service.rs) moved to a service on
+  ; 2026-08-20. This script did not, which left the two disagreeing about what a hub even IS: a
+  ; machine installed from THIS file got a task, and the app -- which queries `sc` -- reported no
+  ; hub installed over a hub that was running fine. Same string, two namespaces, nothing to see.
   ;
-  ; What actually broke on CENTRAL was a corrupt TaskCache entry for the NAME BoatRVGuardianHub,
-  ; from repeated create/delete races while Sophos deleted files mid-operation. The proof was in
-  ; hand at the time and got ignored: a task with an UNQUOTED path under that same name ALSO failed,
-  ; while both quoted and unquoted tasks under other names ran fine, and the name recovered after a
-  ; logoff/logon. Machine damage, not a product defect.
+  ; THE SPACE AFTER EACH `=` IS REQUIRED. `sc.exe` parses `binPath= value` as one option; writing
+  ; `binPath=value` silently misparses. This is sc's syntax, not a typo.
   ;
-  ; Kept because it is tidy and this path has no spaces. If a path with spaces ever needs quoting,
-  ; quote it -- nothing here says you cannot.
-  nsExec::ExecToLog 'schtasks /Create /F /TN "${TASK_NAME}" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR $INSTDIR\bin\brvg-hub.exe'
+  ; The `--service` flag is what makes the binary start an SCM control dispatcher instead of
+  ; running as a plain foreground hub (daemon/src/main.rs). Without it the SCM starts the process,
+  ; waits for a service that never reports in, and kills it -- so the flag is part of the contract,
+  ; not a convenience.
+  ;
+  ; ⚠️ THE `\$\"` IS A DOUBLE ESCAPE AND BOTH HALVES ARE NECESSARY. The registered binPath must be
+  ;   "C:\ProgramData\BoatRVGuardian\bin\brvg-hub.exe" --service
+  ; quotes included, so that the SCM splits the program from its argument. Getting there needs a
+  ; literal BACKSLASH-QUOTE on sc.exe's command line, because sc's value is itself wrapped in quotes
+  ; and the C runtime's argv parser would otherwise eat the inner pair -- `binPath= ""path" --service"`
+  ; collapses to `path --service` with no quotes at all. In NSIS, `\` is the backslash and `$\"` is
+  ; the quote. The app's installer reaches the same string a different way (PowerShell New-Service,
+  ; which needs no escaping), and the two MUST agree.
+  ;
+  ; This survives on a path with no spaces even when it is wrong, which is exactly why it is spelled
+  ; out here: $INSTDIR is C:\ProgramData\BoatRVGuardian today, and the day it is not, an unquoted
+  ; binPath registers a service that can never start.
+  ${If} $AutoStart == "1"
+    StrCpy $StartMode "auto"
+  ${Else}
+    StrCpy $StartMode "demand"
+  ${EndIf}
+  nsExec::ExecToLog 'sc.exe create "${SERVICE_NAME}" binPath= "\$\"$INSTDIR\bin\brvg-hub.exe\$\" --service" start= $StartMode DisplayName= "${HUB_NAME}"'
   Pop $0
   ${If} $0 != 0
-    DetailPrint "WARNING: could not register the service (schtasks exit $0)."
+    DetailPrint "WARNING: could not register the service (sc create exit $0)."
   ${EndIf}
 
-  ; Repair the settings schtasks imposes by default, then apply the SDDL. Both live in a .ps1
-  ; rather than inline here because the last inline PowerShell one-liner needed nine backslashes to
-  ; express one, and this one has to set six properties and re-register the task.
-  ;
-  ; What it fixes, all measured on CENTRAL 2026-08-20 and none of them anyone's decision:
-  ;   StopIfGoingOnBatteries=True   -- Windows STOPS the hub when the machine goes on battery.
-  ;                                    On a boat that is the moment shore power drops, which is
-  ;                                    precisely when the owner needs it watching.
-  ;   DisallowStartIfOnBatteries=True -- and it will not start there in the first place.
-  ;   ExecutionTimeLimit=PT72H      -- an "always-on" service killed every three days.
-  File "task-harden.ps1"
-  nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTDIR\bin\task-harden.ps1" -TaskName "${TASK_NAME}" -Sddl "${TASK_SDDL}"'
+  ; The description is a separate call -- `sc create` has no parameter for it. Cosmetic, so a
+  ; failure is not collected: it decides what services.msc shows, never whether the hub runs.
+  nsExec::ExecToLog 'sc.exe description "${SERVICE_NAME}" "${SERVICE_DESC}"'
   Pop $0
-  ${If} $0 != 0
-    DetailPrint "WARNING: could not harden the service settings (exit $0)."
-  ${EndIf}
-  Delete "$INSTDIR\bin\task-harden.ps1"
+
+  ; RESTART ON CRASH -- the one thing the scheduled task genuinely gave us for free and a service
+  ; does not. A boat's hub is unattended for weeks; a panic that leaves it dead until someone walks
+  ; aboard is the failure that matters. Three restarts a minute apart, with the count resetting
+  ; each day, so a repeatedly-crashing build still backs off instead of spinning forever.
+  ; ⚠️ Same spacing rule as above, and `actions=` takes slash-separated pairs in milliseconds.
+  ; Identical to what the app's installer applies -- the two must not drift.
+  nsExec::ExecToLog 'sc.exe failure "${SERVICE_NAME}" reset= 86400 actions= restart/60000/restart/60000/restart/60000'
+  Pop $0
+
+  ; ⚠️ THE SCHEDULED TASK'S ENTIRE HARDENING PASS IS GONE WITH THE TASK, AND NOTHING REPLACED IT
+  ; BECAUSE NOTHING NEEDS TO. task-harden.ps1 existed to undo defaults `schtasks /Create` imposes,
+  ; all measured on CENTRAL 2026-08-20 and none of them anyone's decision:
+  ;   StopIfGoingOnBatteries=True     -- Windows STOPPED the hub when the machine went on battery,
+  ;                                      i.e. the moment shore power drops, which is precisely when
+  ;                                      the owner needs it watching.
+  ;   DisallowStartIfOnBatteries=True -- and it would not start there in the first place.
+  ;   ExecutionTimeLimit=PT72H        -- an "always-on" service killed every three days.
+  ; A Windows service has no battery policy and no execution time limit. These are task concepts,
+  ; so the whole class of bug is removed rather than re-fixed.
+  ;
+  ; TASK_SDDL is gone for the same kind of reason. The task's default security descriptor hid it
+  ; from standard users, so an unelevated app reported "not installed" over a running hub (app
+  ; #417) and we had to widen it by hand. The SCM's default descriptor already grants every
+  ; authenticated account SERVICE_QUERY_STATUS, so `sc query` works unelevated with nothing added.
+  ; ⚠️ STILL WORTH ONE BENCH CHECK AS A GENUINE STANDARD USER -- it is the exact surface that bit
+  ; us on the task, and "the default should grant it" is a claim until a non-admin account has
+  ; actually seen this service on a real box.
 
   ${If} $AutoStart == "1"
     DetailPrint "The hub will start with this computer."
-    nsExec::ExecToLog 'schtasks /Run /TN "${TASK_NAME}"'
+    nsExec::ExecToLog 'sc.exe start "${SERVICE_NAME}"'
     Pop $0
   ${Else}
+    ; `start= demand` above already did this. Unlike the task -- where /Disable was a second,
+    ; separate call after /Create -- the service's start type is set at creation, so there is
+    ; nothing to turn off here.
     DetailPrint "Installed. The hub will only start when told to."
-    nsExec::ExecToLog 'schtasks /Change /TN "${TASK_NAME}" /Disable'
-    Pop $0
   ${EndIf}
 
   ; ---- VERIFY OUR OWN WORK BEFORE CLAIMING SUCCESS -------------------------------------------
   ;
-  ; MEASURED ON CENTRAL, 2026-08-19. Sophos Endpoint Defense flagged the schtasks call above as
-  ; Persist_6a (MITRE T1053.005 - Scheduled Task persistence), blocked the task, and QUARANTINED
-  ; bin\brvg-hub.exe about 14 seconds later. This installer exited 0 the entire time.
+  ; MEASURED ON CENTRAL, 2026-08-19, WHEN THIS SECTION STILL CREATED A SCHEDULED TASK. Sophos
+  ; Endpoint Defense flagged the schtasks call as Persist_6a (MITRE T1053.005), blocked the task,
+  ; and QUARANTINED bin\brvg-hub.exe about 14 seconds later. This installer exited 0 the entire
+  ; time.
   ;
   ; That is the worst possible outcome. A visible failure sends someone looking; a SILENT one
   ; leaves the app's setup screen sitting on "install the service" forever with nothing to read,
-  ; on a machine where the hub will never run. An unsigned installer invoking schtasks to create a
-  ; SYSTEM boot task is a textbook persistence pattern, so this is not exotic -- Sophos Home is
-  ; consumer software, and any behavioural endpoint agent watches for it.
+  ; on a machine where the hub will never run.
   ;
-  ; So do not trust the exit codes of tools an endpoint agent can neutralise underneath us. Look
-  ; at the disk and the task store and report what is ACTUALLY there.
+  ; ⚠️ THE SERVICE WENT UNFLAGGED BY THAT SAME ACTIVE SOPHOS, BUT THAT DOES NOT RETIRE THIS CHECK,
+  ; AND DO NOT LET ANYONE ARGUE THAT IT DOES. One product, one version, one machine, on one
+  ; technique. This installer is still unsigned and still registers a SYSTEM-executed persistence
+  ; entry, which is a thing behavioural endpoint agents are built to notice however it is spelled.
+  ; So do not trust the exit codes of tools an endpoint agent can neutralise underneath us. Look at
+  ; the disk and the SCM and report what is ACTUALLY there.
   StrCpy $Failures ""
 
-  IfFileExists "$INSTDIR\bin\brvg-hub.exe" check_task 0
+  IfFileExists "$INSTDIR\bin\brvg-hub.exe" check_service 0
     StrCpy $Failures "$Failures$\r$\n  - the hub program file is missing from $INSTDIR\bin"
-  check_task:
+  check_service:
 
-  nsExec::ExecToLog 'schtasks /Query /TN "${TASK_NAME}"'
+  nsExec::ExecToLog 'sc.exe query "${SERVICE_NAME}"'
   Pop $0
   ${If} $0 != 0
     StrCpy $Failures "$Failures$\r$\n  - the background service was not registered"
   ${EndIf}
 
   ; AND THAT IT ACTUALLY STARTED. Existence is not running, and the difference is not academic:
-  ; on CENTRAL 2026-08-20 the binary was on disk and the task was registered and queryable -- this
-  ; check passed -- while the task could not launch anything at all, because its <Command> carried
-  ; literal quotes. The installer said "installed" about a hub that had never run and could not.
+  ; on CENTRAL 2026-08-20 the binary was on disk and the persistence entry was registered and
+  ; queryable -- this check passed -- while it could not launch anything at all. The installer said
+  ; "installed" about a hub that had never run and could not.
+  ;
+  ; A service adds a second way to be registered-but-dead that a task did not have: if the binary
+  ; is started WITHOUT `--service` it never reports to the SCM, so `sc create` succeeds, `sc start`
+  ; times out at 30s with error 1053, and `sc query` still shows the service. Watching for the
+  ; PROCESS, not the SCM's opinion, is what catches that.
   ;
   ; Only when auto-start was chosen. "Install, but start it manually" means not running is correct.
   ; Up to 15s: the daemon binds a socket and reads its config, and a slow disk should not fail an
@@ -293,13 +364,13 @@ Section "Hub" SecHub
     ; Defender-only Win 11 machine 2026-08-19 (Proxmox VM 107) -- installed cleanly, hub answered,
     ; zero detections. Naming that spares the user hunting through Defender when their actual
     ; blocker is a third-party product.
-    Abort "The hub was NOT installed.$\r$\n$Failures$\r$\n$\r$\nWHY THIS HAPPENS$\r$\nThe hub watches your boat or RV while nobody is aboard, so it has to start with the computer, before anyone signs in. Security software cannot tell that apart from a program trying to hide itself, so some products block it. Windows Defender allows it -- if you are seeing this, it is usually a third-party antivirus.$\r$\n$\r$\nHOW TO FIX IT$\r$\n1. Open your antivirus or endpoint protection.$\r$\n2. Find its quarantine, history, or recent events, and look for an item named brvg-hub or a blocked scheduled task.$\r$\n3. Choose Allow, Restore, or Trust for that item.$\r$\n4. Run this installer again.$\r$\n$\r$\nIf you would rather not allow it, the hub simply will not run on this computer. Nothing else about Boat & RV Guardian is affected -- the app still works, it just cannot monitor while you are away."
+    Abort "The hub was NOT installed.$\r$\n$Failures$\r$\n$\r$\nWHY THIS HAPPENS$\r$\nThe hub watches your boat or RV while nobody is aboard, so it has to start with the computer, before anyone signs in. Security software cannot tell that apart from a program trying to hide itself, so some products block it. Windows Defender allows it -- if you are seeing this, it is usually a third-party antivirus.$\r$\n$\r$\nHOW TO FIX IT$\r$\n1. Open your antivirus or endpoint protection.$\r$\n2. Find its quarantine, history, or recent events, and look for an item named brvg-hub or a blocked service.$\r$\n3. Choose Allow, Restore, or Trust for that item.$\r$\n4. Run this installer again.$\r$\n$\r$\nIf you would rather not allow it, the hub simply will not run on this computer. Nothing else about Boat & RV Guardian is affected -- the app still works, it just cannot monitor while you are away."
   ${EndIf}
 
   ; ---- THE NOTIFICATION-AREA MONITOR -----------------------------------------------------------
   ; Optional, default on (owner, 2026-08-20). It exists because THIS INSTALLER CANNOT REPORT ITS
   ; OWN LATE FAILURES: measured on CENTRAL, a /S install returned 0, passed its self-check, and had
-  ; its binary and task removed by security software ~10s after the process exited. Something
+  ; its binary and persistence entry removed by security software ~10s after the process exited. Something
   ; resident is the only thing that can tell the user about that.
   ${If} $Tray == "1"
     SetOutPath "$INSTDIR\bin"
@@ -339,11 +410,20 @@ Function RemoveEverything
   ; current drive, so `/S /UNINSTALL` -- the path the APP drives -- reported success and deleted
   ; NOTHING. hub.json holds a cloud credential, which makes that a leak rather than untidiness.
   SetShellVarContext all
-  nsExec::ExecToLog 'schtasks /End /TN "${TASK_NAME}"'
+  nsExec::ExecToLog 'sc.exe stop "${SERVICE_NAME}"'
   Pop $0
-  nsExec::ExecToLog 'schtasks /Delete /F /TN "${TASK_NAME}"'
+  ; A service still RUNNING is only MARKED for deletion, so stop it, give it a moment, then delete.
+  Sleep 1500
+  nsExec::ExecToLog 'sc.exe delete "${SERVICE_NAME}"'
   Pop $0
-  ; /End only reaches a scheduler-owned process; anything else keeps the binary locked and RMDir
+  ; The legacy scheduled task too: a machine that installed a hub before 2026-08-27 carries one,
+  ; and an uninstall that leaves a SYSTEM boot entry pointing at a deleted binary is worse than no
+  ; uninstall at all. Silenced -- most machines never had one.
+  nsExec::ExecToLog 'schtasks /End /TN "${LEGACY_TASK_NAME}"'
+  Pop $0
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "${LEGACY_TASK_NAME}"'
+  Pop $0
+  ; `sc stop` only reaches an SCM-owned process; anything else keeps the binary locked and RMDir
   ; would silently leave it behind.
   ; The tray monitor rides along with the hub -- a leftover Run key pointing at a deleted file, or
   ; a running monitor polling a hub that no longer exists, are both worse than nothing.
@@ -361,11 +441,17 @@ Function RemoveEverything
 FunctionEnd
 
 Section "Uninstall"
-  nsExec::ExecToLog 'schtasks /End /TN "${TASK_NAME}"'
+  nsExec::ExecToLog 'sc.exe stop "${SERVICE_NAME}"'
   Pop $0
-  nsExec::ExecToLog 'schtasks /Delete /F /TN "${TASK_NAME}"'
+  Sleep 1500
+  nsExec::ExecToLog 'sc.exe delete "${SERVICE_NAME}"'
   Pop $0
-  ; Same reason as RemoveEverything: a hub not owned by the scheduler holds bin\brvg-hub.exe open,
+  ; And the legacy scheduled task, for a machine upgraded from the pre-service hub.
+  nsExec::ExecToLog 'schtasks /End /TN "${LEGACY_TASK_NAME}"'
+  Pop $0
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "${LEGACY_TASK_NAME}"'
+  Pop $0
+  ; Same reason as RemoveEverything: a hub not owned by the SCM holds bin\brvg-hub.exe open,
   ; and RMDir would quietly skip it, leaving a working hub behind after a "successful" uninstall.
   ; The tray monitor rides along with the hub -- a leftover Run key pointing at a deleted file, or
   ; a running monitor polling a hub that no longer exists, are both worse than nothing.
