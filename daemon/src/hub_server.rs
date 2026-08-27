@@ -766,8 +766,63 @@ const LINKTAP_POLL_SECS: u64 = 60;
 
 /// Rebuild the machine when the configured gateway/valves change, and keep the paid gate current.
 /// Returns false when LinkTap is not configured or not permitted, in which case nothing polls.
+/// Run one discovery sweep and PERSIST what it finds, so the answer survives a restart and the
+/// scan is not repeated every poll. Returns the updated config when a gateway was adopted.
+///
+/// Adopts a gateway only when EXACTLY ONE is on the LAN. With several, the hub does not guess —
+/// picking one silently is how a vessel ends up with its second gateway quietly unmanaged; it says
+/// so and waits for the manual field, which is what that field is for.
+async fn discover_linktap_gateway(rt: &Rt) -> Option<hub_config::HubConfig> {
+    let found = crate::linktap_discover::scan_local_subnet(&http_client()).await;
+    match found.len() {
+        0 => None,
+        1 => {
+            let d = &found[0];
+            let _g = rt.store.lock().await;
+            // Re-read under the lock: the app may have written a host while the sweep ran, and a
+            // typed address must never be clobbered by a scan that started before it.
+            let mut cfg = hub_config::read_config_in(&rt.base);
+            if !cfg.linktap.host.is_empty() {
+                eprintln!("linktap discovery: a host was configured while scanning — keeping it");
+                return Some(cfg);
+            }
+            cfg.linktap.host = d.host.clone();
+            cfg.linktap.gw_id = d.gw_id.clone();
+            cfg.linktap.dev_ids = d.dev_ids.clone();
+            if let Err(e) = hub_config::write_config_in(&rt.base, &cfg) {
+                eprintln!("linktap discovery: found {} but could not save it: {e}", d.host);
+                return None;
+            }
+            eprintln!(
+                "linktap discovery: adopted gateway {} at {} ({} valve(s)) — saved",
+                d.gw_id, d.host, d.dev_ids.len()
+            );
+            Some(cfg)
+        }
+        n => {
+            eprintln!(
+                "linktap discovery: {n} gateways answered on this LAN — not guessing which is this vehicle's; set the gateway address in the app"
+            );
+            None
+        }
+    }
+}
+
 async fn linktap_sync_config(rt: &Rt) -> bool {
-    let cfg = hub_config::read_config_in(&rt.base);
+    let mut cfg = hub_config::read_config_in(&rt.base);
+    // ZERO-CONFIG DISCOVERY. The cloud says this vehicle may drive a valve, but nobody has told the
+    // hub WHERE the gateway is — the exact state MVP's hub was found in on 2026-08-26: allowed
+    // true, host/gw_id/dev_ids all empty, so the poll loop never ran and the valve was unmanaged.
+    // Everything needed is obtainable from the gateway itself (see linktap_discover), so ask the
+    // LAN rather than wait for someone to type it.
+    //
+    // ⚠️ A CONFIGURED HOST ALWAYS WINS and is never overwritten (owner 2026-08-25: manual entry is
+    // still needed "in some situations like a huge subnet"). Discovery fills a BLANK host only.
+    if cfg.linktap.allowed && cfg.linktap.host.is_empty() {
+        if let Some(found) = discover_linktap_gateway(rt).await {
+            cfg = found;
+        }
+    }
     let lt = &cfg.linktap;
     let usable = lt.allowed && !lt.host.is_empty() && !lt.gw_id.is_empty() && !lt.dev_ids.is_empty();
     let mut guard = rt.linktap.lock().await;

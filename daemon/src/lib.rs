@@ -7,6 +7,7 @@ pub mod linktap_runtime;
 pub mod linktap;
 pub mod hub_relay;
 pub mod hub_server;
+pub mod linktap_discover;
 pub mod tray_state;
 
 // The Windows service host. Windows-only: it links against the SCM (advapi32 via the
