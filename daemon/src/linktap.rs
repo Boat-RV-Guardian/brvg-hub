@@ -215,21 +215,30 @@ pub async fn post_command(
     gw: &Gateway,
     body: &serde_json::Value,
 ) -> GatewayReply {
-    let url = format!("http://{}/api.shtml", gw.host);
-    let res = match client.post(&url).timeout(GATEWAY_TIMEOUT).json(body).send().await {
+    // ⚠️ NOT reqwest. THE GATEWAY IS NOT AN HTTP/1.1 SERVER — it answers HTTP/1.0 with no
+    // Content-Length and delimits the body by closing the connection, which hyper rejects outright
+    // ("connection closed before message completed"). While this used reqwest the hub could not
+    // complete a SINGLE request against real hardware: not a poll, not an open, not a close, not
+    // the flood shutoff. Measured against MVP's GW-02, 2026-08-28. See gateway_http.rs.
+    //
+    // `client` is kept in the signature deliberately: every caller already threads one through, and
+    // removing it would be a wide mechanical change on top of a behavioural fix. It is unused here.
+    let _ = client;
+    let body_str = body.to_string();
+    let res = match crate::gateway_http::post_json(&gw.host, "/api.shtml", &body_str, GATEWAY_TIMEOUT).await {
         Ok(r) => r,
         Err(e) => {
-            return GatewayReply { ok: false, ret: None, data: serde_json::Value::Null, error: Some(e.to_string()) }
+            return GatewayReply { ok: false, ret: None, data: serde_json::Value::Null, error: Some(e) }
         }
     };
-    if !res.status().is_success() {
-        let s = res.status().as_u16();
+    if !(200..300).contains(&res.status) {
+        let s = res.status;
         return GatewayReply {
             ok: false, ret: None, data: serde_json::Value::Null,
             error: Some(format!("gateway returned HTTP {s}")),
         };
     }
-    let text = res.text().await.unwrap_or_default();
+    let text = res.body;
     let parsed: serde_json::Value = match serde_json::from_str(extract_json(&text)) {
         Ok(v) => v,
         Err(_) => {
