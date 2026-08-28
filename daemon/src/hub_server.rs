@@ -1075,7 +1075,17 @@ const LINKTAP_POLL_SECS: u64 = 60;
 /// picking one silently is how a vessel ends up with its second gateway quietly unmanaged; it says
 /// so and waits for the manual field, which is what that field is for.
 async fn discover_linktap_gateway(rt: &Rt) -> Option<hub_config::HubConfig> {
-    let found = crate::linktap_discover::scan_local_subnet(&http_client()).await;
+    // A DEDICATED CLIENT, because the shared one is built for commands and this is a sweep.
+    // `http_client()` waits 20 s, which is right for a valve mid-RF-retry and badly wrong for 253
+    // addresses with nothing on them: on Windows a dead host burns the full timeout, so a /24 took
+    // ~160 s per pass. A gateway on the same LAN answers in milliseconds, so 2 s is generous and
+    // turns a sweep into ~16 s — the difference between "finds the gateway within a poll" and
+    // "still sweeping when the next poll starts".
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_else(|_| http_client());
+    let found = crate::linktap_discover::scan_local_subnet(&client).await;
     match found.len() {
         0 => None,
         1 => {

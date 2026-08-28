@@ -165,6 +165,93 @@ pub fn local_ipv4s() -> Vec<String> {
 }
 
 #[cfg(test)]
+mod probe_contract {
+    //! 🔴 THE TESTS THAT WOULD HAVE CAUGHT THE ret:3 BUG, AND WHY THE OLD ONES DID NOT.
+    //!
+    //! Every existing test fed the `ret:3` payload straight to `parse_gw_id`, which has always
+    //! handled it correctly. The defect was one line ABOVE that call — `probe` bailed on
+    //! `first.ok`, which `post_command` sets false for any non-zero `ret`, so the refusal that
+    //! CARRIES the gateway id was discarded before anything parsed it. Discovery could not find a
+    //! gateway on any network, and every unit test still passed.
+    //!
+    //! So these drive `probe` itself against a stub that answers exactly as MVP's GW-02 does.
+    //! A helper tested in isolation says nothing about a caller that throws its input away first.
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A stand-in gateway: the FIRST `cmd 16` is refused with ret:3 (and leaks the id, as the real
+    /// hardware does), the second — now addressed — returns the full configuration.
+    async fn stub_gateway(full_second: bool) -> String {
+        use axum::{routing::post, Router};
+        let calls = Arc::new(Mutex::new(0usize));
+        let app = Router::new().route(
+            "/api.shtml",
+            post(move || {
+                let calls = calls.clone();
+                async move {
+                    let mut n = calls.lock().unwrap();
+                    *n += 1;
+                    if *n == 1 {
+                        // Verbatim from MVP, HTML wrapper included — the gateway really does this.
+                        r#"<html><body><!--#RET-->{"cmd":16,"gw_id":"1485A036004B1200","ret":3}</body></html>"#
+                    } else if full_second {
+                        r#"<html><body><!--#RET-->{"cmd":16,"gw_id":"1485A036004B1200","ver":"G0609","vol_unit":"gal","end_dev":["3CC1C335004B1200"],"dev_name":["MVP Fresh Water Valve"]}</body></html>"#
+                    } else {
+                        r#"<html><body><!--#RET-->{"cmd":16,"ret":1}</body></html>"#
+                    }
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        addr.to_string()
+    }
+
+    #[tokio::test]
+    async fn probe_reads_the_ret3_refusal_because_that_is_where_the_gateway_id_lives() {
+        let host = stub_gateway(true).await;
+        let d = probe(&reqwest::Client::new(), &host).await.expect(
+            "a gateway that refuses the un-addressed cmd 16 with ret:3 MUST still be discovered —              that refusal is the bootstrap, not a failure",
+        );
+        assert_eq!(d.gw_id, "1485A036004B1200");
+        assert_eq!(d.dev_ids, vec!["3CC1C335004B1200"]);
+    }
+
+    #[tokio::test]
+    async fn a_host_that_is_not_a_gateway_is_still_rejected() {
+        // The fix must not turn "anything that answers port 80" into a gateway. A router's 404 page
+        // or a Shelly has no gw_id to parse, so it is refused at the parse rather than at `ok`.
+        use axum::{routing::post, Router};
+        let app = Router::new().route("/api.shtml", post(|| async { "<html>404 not found</html>" }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        assert!(probe(&reqwest::Client::new(), &addr.to_string()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_dead_host_is_rejected_without_hanging_the_sweep() {
+        // Nothing listening: the transport fails, `data` is Null, no gw_id. This is the case that
+        // makes up 253 of every 254 probes, so it must be cheap and certain.
+        let c = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(400))
+            .build()
+            .unwrap();
+        assert!(probe(&c, "127.0.0.1:9").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_gateway_that_refuses_the_addressed_read_is_not_adopted() {
+        // ret:3 on the bootstrap is expected. A refusal on the SECOND, properly addressed read is a
+        // real refusal, and adopting a gateway we cannot read the valve list from would leave the
+        // hub configured for hardware it cannot drive.
+        let host = stub_gateway(false).await;
+        assert!(probe(&reqwest::Client::new(), &host).await.is_none());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -251,11 +338,26 @@ mod tests {
 /// Probe ONE host with a read-only `cmd 16`. `None` for anything that is not a LinkTap gateway.
 async fn probe(client: &reqwest::Client, host: &str) -> Option<Discovered> {
     let gw = Gateway { host: host.to_string(), gw_id: String::new() };
-    // No gw_id: the reply refuses with ret:3 and hands us the id (see the module note).
+    // No gw_id: the reply REFUSES with ret:3 and hands us the id anyway (see the module note).
     let first = linktap::post_command(client, &gw, &serde_json::json!({ "cmd": 16 })).await;
-    if !first.ok {
-        return None;
-    }
+    // 🔴 DO NOT REINSTATE AN `if !first.ok { return None }` HERE. It was here, and it made discovery
+    // incapable of finding ANY gateway on ANY network — shipped in daemon-v0.3.9 and found on
+    // CENTRAL on 2026-08-28, where a gateway sat one hop away answering this exact probe while the
+    // hub swept past it every 60 seconds.
+    //
+    // `post_command` reports `ok: false` for ANY non-zero `ret`, which is right for a command —
+    // `ret:3` means refused. But this probe is not a command, it is a QUESTION, and the refusal IS
+    // the answer: `{"cmd":16,"gw_id":"1485A036004B1200","ret":3}`. Bailing on `ok` threw away the
+    // one field the whole bootstrap exists to read.
+    //
+    // ⚠️ AND NOTE HOW THE TESTS MISSED IT. Every unit test fed the ret:3 payload straight to
+    // `parse_gw_id`, which handles it correctly and always did. Nothing exercised the line ABOVE
+    // that parse. A helper tested in isolation says nothing about the caller that discards its
+    // input first — the fix therefore comes with a test of `probe`'s own contract, below.
+    //
+    // What we DO require is a reply we could parse at all: a transport failure (dead host, refused
+    // connection, timeout) has `data: Null` and no gw_id, so the parse below rejects it. That is
+    // the real discriminator between "not a gateway" and "a gateway saying no".
     let gw_id = parse_gw_id(&first.data)?;
     // Now ask properly for the valve list.
     let gw = Gateway { host: host.to_string(), gw_id };
