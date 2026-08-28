@@ -635,7 +635,7 @@ async fn h_bootstrap(
 /// Shelly secret, and nothing may start: `shellyIngestArmed` exists precisely so a caller can ask
 /// whether a secret is set without being told what it is. Read that rule before adding a log line
 /// near a credential.
-async fn do_logs(rt: &Rt, caller: &Caller) -> Answer {
+async fn do_logs(_rt: &Rt, caller: &Caller) -> Answer {
     if !may_control(&caller.role) {
         return err(403, "reading the hub log needs control access or above");
     }
