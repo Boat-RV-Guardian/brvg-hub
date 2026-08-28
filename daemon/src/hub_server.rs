@@ -218,6 +218,7 @@ pub fn new_rt(base: PathBuf, worker_base: String) -> Shared {
 pub fn router(rt: Shared) -> Router {
     Router::new()
         .route("/api/hub/status", get(h_status))
+        .route("/api/hub/logs", get(h_logs))
         .route("/api/hub/config", post(h_config))
         .route("/api/hub/token", post(h_token))
         .route("/api/hub/clear", post(h_clear))
@@ -369,6 +370,7 @@ fn err(status: u16, message: &str) -> Answer {
 pub async fn dispatch(rt: &Rt, caller: &Caller, method: &str, path: &str, body: &[u8]) -> Answer {
     match (method, path) {
         ("GET", "/api/hub/status") => do_status(rt).await,
+        ("GET", "/api/hub/logs") => do_logs(rt, caller).await,
         ("POST", "/api/hub/config") => do_config(rt, caller, body).await,
         ("POST", "/api/hub/token") => do_token(rt, caller, body).await,
         ("POST", "/api/hub/clear") => do_clear(rt, caller).await,
@@ -618,8 +620,36 @@ async fn h_bootstrap(
     answer_response(ok_json(&status_body(&rt).await))
 }
 
+/// The hub's own recent log lines.
+///
+/// ⚠️ THIS IS THE POINT OF THE LOG FILE. A hub sits on a boat behind marina NAT with nobody aboard;
+/// "read the log" otherwise means "get physical access to the machine", which is exactly the
+/// situation that made a discovery failure un-diagnosable on 2026-08-28. Being RELAYABLE is what
+/// turns that into a question the app can answer from anywhere.
+///
+/// Role-gated at CONTROL and above, deliberately: a log is a diagnostic, not public reading. It
+/// carries gateway addresses, valve ids and vehicle names, and a `monitor` share is someone trusted
+/// to watch a boat, not to read its internals.
+///
+/// ⚠️ IT MUST NEVER CARRY A SECRET. Nothing in this daemon logs the hub token, a member key or the
+/// Shelly secret, and nothing may start: `shellyIngestArmed` exists precisely so a caller can ask
+/// whether a secret is set without being told what it is. Read that rule before adding a log line
+/// near a credential.
+async fn do_logs(rt: &Rt, caller: &Caller) -> Answer {
+    if !may_control(&caller.role) {
+        return err(403, "reading the hub log needs control access or above");
+    }
+    let text = crate::hub_log::tail(300);
+    let path = crate::hub_log::path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+    ok_json(&serde_json::json!({ "path": path, "lines": text }))
+}
+
 async fn h_status(State(rt): State<Shared>, headers: HeaderMap) -> Response {
     lan_call(&rt, &headers, "GET", "/api/hub/status", b"").await
+}
+
+async fn h_logs(State(rt): State<Shared>, headers: HeaderMap) -> Response {
+    lan_call(&rt, &headers, "GET", "/api/hub/logs", b"").await
 }
 
 async fn h_config(State(rt): State<Shared>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
@@ -874,7 +904,7 @@ async fn h_shelly(
     // cheapest test and it discloses nothing: an off-LAN caller learns only that it is off-LAN,
     // which it already knew, and never whether it guessed a secret.
     if !shelly_peer_plausible(peer.ip()) {
-        eprintln!(
+        crate::hlog!(
             "shelly: REFUSED a '{}' report from {} — that peer is not on a plausible vessel network. \
              If this is a real boat LAN the address range needs adding to shelly_peer_plausible.",
             call.event, peer.ip()
@@ -887,14 +917,14 @@ async fn h_shelly(
         ShellyAuth::Disarmed => {
             // LOUD, because the failure is invisible from the outside: every flood report this hub
             // receives is being refused, and the sensor has no way to tell anyone.
-            eprintln!(
+            crate::hlog!(
                 "shelly: REFUSED a '{}' report from {} — this hub holds no webhook secret. Set it in the app (hub settings) or the local flood close CANNOT run.",
                 call.event, call.device
             );
             return answer_response(err(401, "this hub has no webhook secret configured"));
         }
         ShellyAuth::BadSecret => {
-            eprintln!("shelly: refused a '{}' report from {} — wrong or missing k", call.event, call.device);
+            crate::hlog!("shelly: refused a '{}' report from {} — wrong or missing k", call.event, call.device);
             return answer_response(err(401, "missing or wrong webhook secret"));
         }
         ShellyAuth::WrongVehicle => {
@@ -904,7 +934,7 @@ async fn h_shelly(
 
     let flood = crate::linktap_runtime::is_flood_shutoff(&call.event);
     if flood {
-        eprintln!("shelly: FLOOD — '{}' from {} — closing every valve NOW", call.event, call.device);
+        crate::hlog!("shelly: FLOOD — '{}' from {} — closing every valve NOW", call.event, call.device);
     }
 
     // Answer FIRST, act after — the same discipline as the gateway push route, for a sharper
@@ -953,7 +983,7 @@ async fn heartbeat_loop(rt: Shared) {
         if !cfg.token.is_empty() && !cfg.vid.is_empty() && cfg.enabled {
             match heartbeat_with_reply(&client, &rt.worker_base, &cfg).await {
                 Ok(body) => apply_linktap_reply(&rt, &body).await,
-                Err(e) => eprintln!("hub: heartbeat failed: {e}"),
+                Err(e) => crate::hlog!("hub: heartbeat failed: {e}"),
             }
             let secs = u64::from(cfg.heartbeat_secs).max(HEARTBEAT_FLOOR_SECS);
             tokio::time::sleep(Duration::from_secs(secs)).await;
@@ -987,10 +1017,10 @@ async fn apply_linktap_reply(rt: &Rt, body: &serde_json::Value) {
         let _g = rt.store.lock().await;
         let mut cfg = hub_config::read_config_in(&rt.base);
         if cfg.linktap.allowed != allowed {
-            eprintln!("linktap: valve control {} by the vehicle's plan", if allowed { "permitted" } else { "NOT permitted" });
+            crate::hlog!("linktap: valve control {} by the vehicle's plan", if allowed { "permitted" } else { "NOT permitted" });
             cfg.linktap.allowed = allowed;
             if let Err(e) = hub_config::write_config_in(&rt.base, &cfg) {
-                eprintln!("hub: could not persist the linktap permission: {e}");
+                crate::hlog!("hub: could not persist the linktap permission: {e}");
             }
         }
     }
@@ -1014,12 +1044,12 @@ async fn key_sync_loop(rt: Shared) {
                     let mut c = hub_config::read_config_in(&rt.base);
                     c.member_keys = keys;
                     if let Err(e) = hub_config::write_config_in(&rt.base, &c) {
-                        eprintln!("hub: could not persist member keys: {e}");
+                        crate::hlog!("hub: could not persist member keys: {e}");
                     }
                 }
                 // Keep the last known set — a network drop must not lock the owner out. (Before
                 // increment C's endpoint deploys this is a permanent 404: deny-all continues.)
-                Err(e) => eprintln!("hub: key sync failed (keeping previous keys): {e}"),
+                Err(e) => crate::hlog!("hub: key sync failed (keeping previous keys): {e}"),
             }
         }
         tokio::time::sleep(Duration::from_secs(KEY_SYNC_SECS)).await;
@@ -1055,24 +1085,24 @@ async fn discover_linktap_gateway(rt: &Rt) -> Option<hub_config::HubConfig> {
             // typed address must never be clobbered by a scan that started before it.
             let mut cfg = hub_config::read_config_in(&rt.base);
             if !cfg.linktap.host.is_empty() {
-                eprintln!("linktap discovery: a host was configured while scanning — keeping it");
+                crate::hlog!("linktap discovery: a host was configured while scanning — keeping it");
                 return Some(cfg);
             }
             cfg.linktap.host = d.host.clone();
             cfg.linktap.gw_id = d.gw_id.clone();
             cfg.linktap.dev_ids = d.dev_ids.clone();
             if let Err(e) = hub_config::write_config_in(&rt.base, &cfg) {
-                eprintln!("linktap discovery: found {} but could not save it: {e}", d.host);
+                crate::hlog!("linktap discovery: found {} but could not save it: {e}", d.host);
                 return None;
             }
-            eprintln!(
+            crate::hlog!(
                 "linktap discovery: adopted gateway {} at {} ({} valve(s)) — saved",
                 d.gw_id, d.host, d.dev_ids.len()
             );
             Some(cfg)
         }
         n => {
-            eprintln!(
+            crate::hlog!(
                 "linktap discovery: {n} gateways answered on this LAN — not guessing which is this vehicle's; set the gateway address in the app"
             );
             None
@@ -1102,7 +1132,7 @@ async fn linktap_sync_config(rt: &Rt) -> bool {
         // Dropping the machine on a revoked plan is deliberate: a hub whose vehicle stopped paying
         // must stop driving the valve, not merely stop advertising that it can.
         if guard.is_some() {
-            eprintln!("linktap: configuration withdrawn or plan no longer permits valve control — stopping");
+            crate::hlog!("linktap: configuration withdrawn or plan no longer permits valve control — stopping");
         }
         *guard = None;
         return false;
@@ -1128,7 +1158,7 @@ async fn linktap_sync_config(rt: &Rt) -> bool {
         // Read the gateway's unit ONCE per rebuild. Defaults to GALLONS when unreadable, because
         // guessing litres under-reports a cap by 3.79x and the cutoff compares against it.
         r.unit = linktap::read_vol_unit(&http_client(), &gw).await;
-        eprintln!("linktap: watching {} valve(s) via {} (unit {:?})", lt.dev_ids.len(), lt.host, r.unit);
+        crate::hlog!("linktap: watching {} valve(s) via {} (unit {:?})", lt.dev_ids.len(), lt.host, r.unit);
         *guard = Some(r);
     }
     true
@@ -1154,12 +1184,12 @@ async fn linktap_act(
         }
     };
     if let crate::cycle::Action::Stop(reason) = action {
-        eprintln!("linktap: {dev_id} — issuing stop ({})", reason.as_str());
+        crate::hlog!("linktap: {dev_id} — issuing stop ({})", reason.as_str());
         let reply = linktap::post_command(client, &gw, &linktap::build_stop(&gw, dev_id)).await;
         if !reply.ok {
             // A close that did not happen is worth hearing about immediately; the machine keeps
             // stop_issued set, so the next observation retries without a re-issue storm.
-            eprintln!("linktap: {dev_id} STOP FAILED: {:?}", reply.error);
+            crate::hlog!("linktap: {dev_id} STOP FAILED: {:?}", reply.error);
             spool_report(rt, &crate::linktap_runtime::Report {
                 device: format!("lt_{dev_id}"),
                 event: "linktap.stop_failed".into(),
@@ -1223,7 +1253,7 @@ async fn linktap_poll_loop(rt: Shared) {
                 let (next, report) = crate::linktap_runtime::gateway_watch_step(watch, &gw, reached, now_ms());
                 watch = next;
                 if let Some(r) = report {
-                    eprintln!("linktap: gateway {} — {}", gw.host, r.event);
+                    crate::hlog!("linktap: gateway {} — {}", gw.host, r.event);
                     spool_report(&rt, &r).await;
                 }
             }
@@ -1272,10 +1302,10 @@ pub async fn linktap_flood_stop_all(rt: &Rt) {
                 if lt.host.is_empty() || lt.gw_id.is_empty() || ids.is_empty() {
                     // Genuinely nothing to close: no gateway address, no valves. Say so — a flood
                     // alarm that reached a hub with no valve to shut is worth a log line.
-                    eprintln!("linktap: FLOOD SHUTOFF requested but this hub has no gateway/valves configured");
+                    crate::hlog!("linktap: FLOOD SHUTOFF requested but this hub has no gateway/valves configured");
                     return;
                 }
-                eprintln!(
+                crate::hlog!(
                     "linktap: FLOOD SHUTOFF with no running machine (plan not permitted, or no heartbeat yet) — closing anyway from the stored configuration"
                 );
                 (linktap::Gateway { host: lt.host, gw_id: lt.gw_id }, ids)
@@ -1290,7 +1320,7 @@ pub async fn linktap_flood_stop_all(rt: &Rt) {
             }
         }
         let reply = linktap::post_command(&client, &gw, &linktap::build_stop(&gw, &id)).await;
-        eprintln!("linktap: flood shutoff -> {id} {}", if reply.ok { "closed" } else { "FAILED" });
+        crate::hlog!("linktap: flood shutoff -> {id} {}", if reply.ok { "closed" } else { "FAILED" });
         if !reply.ok {
             spool_report(rt, &crate::linktap_runtime::Report {
                 device: format!("lt_{id}"),
@@ -1320,7 +1350,7 @@ async fn spool_report(rt: &Rt, report: &crate::linktap_runtime::Report) {
         u.query_pairs_mut().append_pair(k, v);
     }
     if let Err(e) = http_client().get(u).send().await {
-        eprintln!("linktap: report {} failed: {e}", report.event);
+        crate::hlog!("linktap: report {} failed: {e}", report.event);
     }
 }
 
@@ -1357,17 +1387,21 @@ where
     let runtime = tokio::runtime::Runtime::new().expect("hub: tokio runtime");
     runtime.block_on(async {
         let base = hub_config::shared_base();
+        // FIRST, before anything that might have something to say. Under the SCM there is no
+        // console, so until this runs every diagnostic below is written to nowhere — which is
+        // exactly how a discovery failure on CENTRAL stayed un-diagnosable for hours.
+        crate::hub_log::init(&base);
         let cfg = hub_config::read_config_in(&base);
         let port = cfg.http_port;
         let rt = new_rt(base, WORKER_BASE.into());
         let listener = match tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("hub: cannot bind 0.0.0.0:{port}: {e}");
+                crate::hlog!("hub: cannot bind 0.0.0.0:{port}: {e}");
                 std::process::exit(1);
             }
         };
-        eprintln!("hub: management API on 0.0.0.0:{port} ({})", if cfg.token.is_empty() { "unregistered — waiting for bootstrap" } else { "registered" });
+        crate::hlog!("hub: management API on 0.0.0.0:{port} ({})", if cfg.token.is_empty() { "unregistered — waiting for bootstrap" } else { "registered" });
         tokio::spawn(heartbeat_loop(rt.clone()));
         tokio::spawn(key_sync_loop(rt.clone()));
         // The LinkTap poll floor. It re-reads its own configuration each pass, so a gateway
@@ -1381,13 +1415,13 @@ where
             // machine" is the whole of its security.
             r = axum::serve(listener, router(rt).into_make_service_with_connect_info::<SocketAddr>()) => {
                 if let Err(e) = r {
-                    eprintln!("hub: server exited: {e}");
+                    crate::hlog!("hub: server exited: {e}");
                 }
             }
             // The caller's stop signal — ctrl-c for a manual run, the SCM's Stop/Shutdown control
             // for a Windows service. Either way it ends the select and the daemon winds down.
             _ = shutdown => {
-                eprintln!("hub: shutting down");
+                crate::hlog!("hub: shutting down");
             }
         }
     });
@@ -1482,11 +1516,11 @@ async fn do_valve(rt: &Rt, caller: &Caller, body: &[u8]) -> Answer {
     let reply = linktap::post_command(&client, &gw, &body_json).await;
     if !reply.ok {
         let detail = reply.error.unwrap_or_else(|| "the gateway refused the command".into());
-        eprintln!("linktap: {} {} failed: {detail}", req.action, dev_id);
+        crate::hlog!("linktap: {} {} failed: {detail}", req.action, dev_id);
         // 502: the hub is fine, the thing BEHIND it refused. The app falls back and says so.
         return err(502, &format!("the gateway did not accept that command: {detail}"));
     }
-    eprintln!("linktap: {} {} ok", req.action, dev_id);
+    crate::hlog!("linktap: {} {} ok", req.action, dev_id);
     ok_json(&serde_json::json!({ "ok": true }))
 }
 

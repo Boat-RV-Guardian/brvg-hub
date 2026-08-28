@@ -280,19 +280,19 @@ pub async fn scan_local_subnet(client: &reqwest::Client) -> Vec<Discovered> {
         }
     }
     if prefixes.is_empty() {
-        eprintln!("linktap discovery: no usable LAN address; skipping scan");
+        crate::hlog!("linktap discovery: no usable LAN address; skipping scan");
         return Vec::new();
     }
     let mut found = Vec::new();
     for prefix in &prefixes {
-        eprintln!(
+        crate::hlog!(
             "linktap discovery: scanning {prefix}.0/24 for a gateway (read-only cmd 16); a gateway \
              outside this /24 — or across a router — needs its address set manually"
         );
         scan_one_prefix(client, prefix, &mut found).await;
     }
     if found.is_empty() {
-        eprintln!("linktap discovery: no gateway answered on any attached LAN");
+        crate::hlog!("linktap discovery: no gateway answered on any attached LAN");
     }
     found
 }
@@ -309,7 +309,7 @@ async fn scan_one_prefix(client: &reqwest::Client, prefix: &str, found: &mut Vec
         }
         while let Some(res) = set.join_next().await {
             if let Ok(Some(d)) = res {
-                eprintln!(
+                crate::hlog!(
                     "linktap discovery: found gateway {} at {} with {} valve(s)",
                     d.gw_id, d.host, d.dev_ids.len()
                 );
