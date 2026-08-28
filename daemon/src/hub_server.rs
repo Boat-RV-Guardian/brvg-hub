@@ -945,7 +945,7 @@ async fn h_shelly(
     // which it already knew, and never whether it guessed a secret.
     if !shelly_peer_plausible(peer.ip()) {
         crate::hlog!(
-            "shelly: REFUSED a '{}' report from {} — that peer is not on a plausible vessel network. \
+            "shelly: REFUSED a '{}' report from {} - that peer is not on a plausible vessel network. \
              If this is a real boat LAN the address range needs adding to shelly_peer_plausible.",
             call.event, peer.ip()
         );
@@ -958,13 +958,13 @@ async fn h_shelly(
             // LOUD, because the failure is invisible from the outside: every flood report this hub
             // receives is being refused, and the sensor has no way to tell anyone.
             crate::hlog!(
-                "shelly: REFUSED a '{}' report from {} — this hub holds no webhook secret. Set it in the app (hub settings) or the local flood close CANNOT run.",
+                "shelly: REFUSED a '{}' report from {} - this hub holds no webhook secret. Set it in the app (hub settings) or the local flood close CANNOT run.",
                 call.event, call.device
             );
             return answer_response(err(401, "this hub has no webhook secret configured"));
         }
         ShellyAuth::BadSecret => {
-            crate::hlog!("shelly: refused a '{}' report from {} — wrong or missing k", call.event, call.device);
+            crate::hlog!("shelly: refused a '{}' report from {} - wrong or missing k", call.event, call.device);
             return answer_response(err(401, "missing or wrong webhook secret"));
         }
         ShellyAuth::WrongVehicle => {
@@ -974,7 +974,7 @@ async fn h_shelly(
 
     let flood = crate::linktap_runtime::is_flood_shutoff(&call.event);
     if flood {
-        crate::hlog!("shelly: FLOOD — '{}' from {} — closing every valve NOW", call.event, call.device);
+        crate::hlog!("shelly: FLOOD - '{}' from {} - closing every valve NOW", call.event, call.device);
     }
 
     // Answer FIRST, act after — the same discipline as the gateway push route, for a sharper
@@ -1135,7 +1135,7 @@ async fn discover_linktap_gateway(rt: &Rt) -> Option<hub_config::HubConfig> {
             // typed address must never be clobbered by a scan that started before it.
             let mut cfg = hub_config::read_config_in(&rt.base);
             if !cfg.linktap.host.is_empty() {
-                crate::hlog!("linktap discovery: a host was configured while scanning — keeping it");
+                crate::hlog!("linktap discovery: a host was configured while scanning - keeping it");
                 return Some(cfg);
             }
             cfg.linktap.host = d.host.clone();
@@ -1146,14 +1146,14 @@ async fn discover_linktap_gateway(rt: &Rt) -> Option<hub_config::HubConfig> {
                 return None;
             }
             crate::hlog!(
-                "linktap discovery: adopted gateway {} at {} ({} valve(s)) — saved",
+                "linktap discovery: adopted gateway {} at {} ({} valve(s)) - saved",
                 d.gw_id, d.host, d.dev_ids.len()
             );
             Some(cfg)
         }
         n => {
             crate::hlog!(
-                "linktap discovery: {n} gateways answered on this LAN — not guessing which is this vehicle's; set the gateway address in the app"
+                "linktap discovery: {n} gateways answered on this LAN - not guessing which is this vehicle's; set the gateway address in the app"
             );
             None
         }
@@ -1182,7 +1182,7 @@ async fn linktap_sync_config(rt: &Rt) -> bool {
         // Dropping the machine on a revoked plan is deliberate: a hub whose vehicle stopped paying
         // must stop driving the valve, not merely stop advertising that it can.
         if guard.is_some() {
-            crate::hlog!("linktap: configuration withdrawn or plan no longer permits valve control — stopping");
+            crate::hlog!("linktap: configuration withdrawn or plan no longer permits valve control - stopping");
         }
         *guard = None;
         return false;
@@ -1234,7 +1234,7 @@ async fn linktap_act(
         }
     };
     if let crate::cycle::Action::Stop(reason) = action {
-        crate::hlog!("linktap: {dev_id} — issuing stop ({})", reason.as_str());
+        crate::hlog!("linktap: {dev_id} - issuing stop ({})", reason.as_str());
         let reply = linktap::post_command(client, &gw, &linktap::build_stop(&gw, dev_id)).await;
         if !reply.ok {
             // A close that did not happen is worth hearing about immediately; the machine keeps
@@ -1303,7 +1303,7 @@ async fn linktap_poll_loop(rt: Shared) {
                 let (next, report) = crate::linktap_runtime::gateway_watch_step(watch, &gw, reached, now_ms());
                 watch = next;
                 if let Some(r) = report {
-                    crate::hlog!("linktap: gateway {} — {}", gw.host, r.event);
+                    crate::hlog!("linktap: gateway {} - {}", gw.host, r.event);
                     spool_report(&rt, &r).await;
                 }
             }
@@ -1356,7 +1356,7 @@ pub async fn linktap_flood_stop_all(rt: &Rt) {
                     return;
                 }
                 crate::hlog!(
-                    "linktap: FLOOD SHUTOFF with no running machine (plan not permitted, or no heartbeat yet) — closing anyway from the stored configuration"
+                    "linktap: FLOOD SHUTOFF with no running machine (plan not permitted, or no heartbeat yet) - closing anyway from the stored configuration"
                 );
                 (linktap::Gateway { host: lt.host, gw_id: lt.gw_id }, ids)
             }
@@ -1451,14 +1451,14 @@ where
                 std::process::exit(1);
             }
         };
-        crate::hlog!("hub: management API on 0.0.0.0:{port} ({})", if cfg.token.is_empty() { "unregistered — waiting for bootstrap" } else { "registered" });
+        crate::hlog!("hub: management API on 0.0.0.0:{port} ({})", if cfg.token.is_empty() { "unregistered - waiting for bootstrap" } else { "registered" });
         // Say the claim window OUT LOUD on an unclaimed hub. This is the one line that makes a
         // headless install self-explanatory: someone who has just run the installer over SSH sees
         // how long they have and what to do if they miss it, without reading any documentation.
         if cfg.token.is_empty() {
             crate::hlog!(
                 "setup: this hub is UNCLAIMED and can be set up from this machine, or from any \
-                 device on its own LAN, for the next {} minutes — restart the service to reopen \
+                 device on its own LAN, for the next {} minutes - restart the service to reopen \
                  the window",
                 crate::adopt::ADOPTION_WINDOW.as_secs() / 60
             );

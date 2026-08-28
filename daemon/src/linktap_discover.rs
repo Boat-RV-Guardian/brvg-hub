@@ -438,7 +438,7 @@ pub async fn scan_local_subnet(client: &reqwest::Client) -> Vec<Discovered> {
     for prefix in &prefixes {
         crate::hlog!(
             "linktap discovery: scanning {prefix}.0/24 for a gateway (read-only cmd 16); a gateway \
-             outside this /24 — or across a router — needs its address set manually"
+             outside this /24 - or across a router - needs its address set manually"
         );
         scan_one_prefix(client, prefix, &mut found).await;
     }
