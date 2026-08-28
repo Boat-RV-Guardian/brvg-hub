@@ -41,6 +41,7 @@
 //! module is the fallback for people who have not typed one, not a replacement for the field.
 
 use crate::linktap::{self, Gateway, VolUnit};
+use std::time::Duration;
 
 /// What one gateway told us about itself. Everything here came from the gateway, not the cloud.
 #[derive(Clone, Debug, PartialEq)]
@@ -242,6 +243,31 @@ mod probe_contract {
     }
 
     #[tokio::test]
+    async fn a_host_that_accepts_and_then_says_nothing_cannot_stall_the_sweep() {
+        // THE 105-SECOND SWEEP. A host that is UP with port 80 filtered (or an embedded device that
+        // accepts and then thinks about it) used to hold a probe for the full 15 s command timeout,
+        // and one of them per 32-wide chunk was enough to make adoption look broken on a fresh
+        // install. `GATEWAY_TIMEOUT` is right for a valve command someone is waiting on; it is not
+        // right for 254 speculative probes, and the client's own timeout reaches nothing because
+        // the transport is a raw TcpStream.
+        //
+        // Accept the connection and never answer. The probe must give up on ITS budget, not the
+        // command budget — asserted as an upper bound well under 15 s so this cannot pass by luck.
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = l.accept().await {
+                held.push(sock); // hold it open, answer nothing
+            }
+        });
+        let started = std::time::Instant::now();
+        assert!(probe(&reqwest::Client::new(), &addr.to_string()).await.is_none());
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(5), "a silent host held the probe for {took:?}");
+    }
+
+    #[tokio::test]
     async fn a_gateway_that_refuses_the_addressed_read_is_not_adopted() {
         // ret:3 on the bootstrap is expected. A refusal on the SECOND, properly addressed read is a
         // real refusal, and adopting a gateway we cannot read the valve list from would leave the
@@ -335,8 +361,31 @@ mod tests {
 
 // --- the scan itself (I/O; the decisions above are what carry the tests) ---------------------
 
+/// How long ONE host gets to prove it is a gateway, both requests included.
+///
+/// ⚠️ THIS IS NOT REDUNDANT WITH THE CLIENT'S TIMEOUT, and assuming it was cost a 105-second sweep.
+/// `post_command` hands `gateway_http::post_json` an explicit `GATEWAY_TIMEOUT` (15 s), which is
+/// right for a valve command a person is waiting on and completely wrong for 254 speculative
+/// probes. The `reqwest::Client` passed in here has its own short timeout and it is IGNORED — the
+/// gateway transport is a raw `TcpStream`, not that client, so the client's settings reach nothing.
+/// A host that is simply DOWN is cheap (the LAN answers with an RST), but a host that is up with
+/// port 80 filtered swallows the SYN and burns the full 15 s, and one such host per 32-wide chunk
+/// is enough to make adoption on a fresh install look broken.
+///
+/// 2 s is generous for a device on the same /24: a real GW-02 answers in tens of milliseconds.
+/// Worst case is now 8 chunks x 2 s, so a /24 completes in about 16 s instead of about 105.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Probe ONE host with a read-only `cmd 16`. `None` for anything that is not a LinkTap gateway.
+///
+/// Bounded, because the sweep is 254 of these and a single unresponsive host must not hold it up.
+/// Dropping the future cancels the in-flight connect, which is what makes the bound real rather
+/// than merely reported.
 async fn probe(client: &reqwest::Client, host: &str) -> Option<Discovered> {
+    tokio::time::timeout(PROBE_TIMEOUT, probe_inner(client, host)).await.ok().flatten()
+}
+
+async fn probe_inner(client: &reqwest::Client, host: &str) -> Option<Discovered> {
     let gw = Gateway { host: host.to_string(), gw_id: String::new() };
     // No gw_id: the reply REFUSES with ret:3 and hands us the id anyway (see the module note).
     let first = linktap::post_command(client, &gw, &serde_json::json!({ "cmd": 16 })).await;
