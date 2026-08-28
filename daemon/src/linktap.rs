@@ -250,6 +250,20 @@ pub async fn post_command(
     }
 }
 
+/// Did the GATEWAY ITSELF answer, whatever it thought of the command?
+///
+/// Deliberately NOT `reply.ok`. A non-zero `ret` is the gateway TALKING — `ret: 5` means the end
+/// device was not found (valve unpowered, out of RF range, dead battery) and `ret: 7` means a
+/// watering plan is in the way; both are replies from a healthy gateway. Reading either as
+/// "unreachable" would raise a gateway-offline notice about a flat valve battery, which is the
+/// wrong device, the wrong owner action, and the wrong repair.
+///
+/// Unreachable is the transport failing: no connection, a non-2xx, or a body that is not JSON —
+/// the three cases `post_command` turns into `ret: None`.
+pub fn reply_reached_gateway(reply: &GatewayReply) -> bool {
+    reply.ok || reply.ret.is_some()
+}
+
 /// Read the gateway's volume unit. Defaults to GALLONS when unreadable — guessing litres
 /// under-reports a cap by 3.79x, and the software cutoff compares against that number.
 pub async fn read_vol_unit(client: &reqwest::Client, gw: &Gateway) -> VolUnit {
@@ -290,6 +304,23 @@ mod tests {
         for v in [json!(false), json!("false"), json!(0), json!("0"), json!(null)] {
             assert!(!coerce_watering(&v), "{v:?} should not read as watering");
         }
+    }
+
+    #[test]
+    fn a_gateway_that_refuses_a_command_is_still_a_gateway_that_answered() {
+        // The gateway-offline watch keys off this: `ret: 5` (valve unpowered / out of RF range) is
+        // a HEALTHY gateway reporting a sick valve. Calling it an outage would alert the owner
+        // about the wrong device entirely.
+        let refused = GatewayReply { ok: false, ret: Some(5), data: json!({"ret":5}), error: Some("x".into()) };
+        assert!(reply_reached_gateway(&refused));
+        let good = GatewayReply { ok: true, ret: Some(0), data: json!({"ret":0}), error: None };
+        assert!(reply_reached_gateway(&good));
+        // A cmd-3 status reply carries no `ret` at all — absence is not failure.
+        let status = GatewayReply { ok: true, ret: None, data: json!({"dev_stat":[]}), error: None };
+        assert!(reply_reached_gateway(&status));
+        // The three transport failures post_command produces: no connection, non-2xx, not JSON.
+        let dead = GatewayReply { ok: false, ret: None, data: serde_json::Value::Null, error: Some("timed out".into()) };
+        assert!(!reply_reached_gateway(&dead));
     }
 
     #[test]

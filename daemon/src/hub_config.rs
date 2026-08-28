@@ -65,6 +65,26 @@ pub struct HubConfig {
     /// and the hub advertises no `linktap` capability at all.
     #[serde(default)]
     pub linktap: LinkTapConfig,
+    /// The per-vehicle WEBHOOK SECRET that authenticates a local Shelly report to
+    /// `/api/hub/shelly`, cached here from the app so the hub can authenticate a FLOOD REPORT
+    /// with the internet down — the case the whole local-ingest path exists for.
+    ///
+    /// It is the SAME value and the same shape as the cloud's `&k=` bearer
+    /// (cloud-server `auth.ts::classifyVehicleWebhookAuth`, custody in `vehicleSecrets.ts`): a
+    /// Shelly fires a static URL and can sign nothing, so a URL bearer is the strongest thing it
+    /// can carry. Pointing a sensor at the hub is therefore a URL swap, not a new credential.
+    ///
+    /// ⚠️ EMPTY MEANS DISARMED, NOT "ACCEPT ANYTHING". The cloud's classifier treats an unset
+    /// secret as `legacy` and ACCEPTS — it is a phased rollout across vehicles that predate the
+    /// scheme. This hub deliberately does NOT copy that half: /api/hub/shelly CLOSES A VALVE, so
+    /// an unset secret refuses every report rather than trusting the LAN. `/api/hub/status`
+    /// reports `shellyIngestArmed` so a disarmed hub is visible instead of silently deaf.
+    ///
+    /// Lives in this file for the same reason `token` and `member_keys` do: it is already the
+    /// hub's one credential store (SYSTEM/0600), and a second file would just be a second thing
+    /// to lock down. Never returned by any endpoint.
+    #[serde(default)]
+    pub shelly_secret: String,
 }
 
 /// The hub's LinkTap configuration and the cloud's PERMISSION for it.
@@ -96,6 +116,7 @@ impl Default for HubConfig {
             http_port: DEFAULT_HTTP_PORT,
             member_keys: Vec::new(),
             linktap: LinkTapConfig::default(),
+            shelly_secret: String::new(),
         }
     }
 }
@@ -265,6 +286,7 @@ mod tests {
                 host: "192.168.8.20".into(), gw_id: "GW02".into(),
                 dev_ids: vec!["aaaabbbbccccdddd".into()], allowed: true,
             },
+            shelly_secret: "wh-secret".into(),
         };
         let text = serde_json::to_string(&cfg).unwrap();
         assert_eq!(serde_json::from_str::<HubConfig>(&text).unwrap(), cfg);
@@ -281,5 +303,9 @@ mod tests {
         assert!(partial.token.is_empty());
         assert_eq!(partial.http_port, DEFAULT_HTTP_PORT);
         assert!(partial.member_keys.is_empty());
+        // The Shelly ingest secret defaults to EMPTY, and empty is DISARMED — a hub.json written
+        // before this field existed must not start accepting unauthenticated valve-closing
+        // reports the moment it is upgraded.
+        assert!(partial.shelly_secret.is_empty());
     }
 }
