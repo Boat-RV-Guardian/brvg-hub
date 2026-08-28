@@ -541,11 +541,25 @@ fn answer_response(a: Answer) -> Response {
 /// Nothing here is a secret. Anyone who can reach this port can already see it is open; telling
 /// them a hub answers on it, and whether it has a vehicle, adds nothing they could not infer.
 async fn h_ping(State(rt): State<Shared>) -> Response {
+    let damage = hub_config::config_damage_in(&rt.base);
     let cfg = hub_config::read_config_in(&rt.base);
+    let registered = !cfg.token.is_empty();
     answer_response(ok_json(&serde_json::json!({
         "ok": true,
-        "registered": !cfg.token.is_empty(),
+        "registered": registered,
         "version": env!("CARGO_PKG_VERSION"),
+        // Is this hub unclaimed AND still inside its setup window? The app sweeps a LAN for hubs
+        // and needs to tell "here is a hub you can adopt" from "here is a hub, but you have missed
+        // its window and should restart its service" — without trying a setup call to find out.
+        "adoptable": !registered && damage.is_none() && rt.started.elapsed() <= crate::adopt::ADOPTION_WINDOW,
+        // ⚠️ A BOOLEAN, HERE, BECAUSE STATUS CANNOT BE REACHED WHEN IT IS TRUE. `configDamaged` was
+        // added to /api/hub/status in #61 — and testing that on CENTRAL showed status is exactly
+        // what a damaged hub CANNOT serve: the member keys that authorize it live in the file that
+        // will not parse, so every read is 401. The one moment the hub most needs to explain
+        // itself is the one moment the authenticated door is shut. Ping is unauthenticated by
+        // design (see the doc comment above), so the fact lives here too. The DETAIL — path and
+        // parse error — stays on status, where a member key has been proven.
+        "configDamaged": damage.is_some(),
     })))
 }
 
@@ -556,8 +570,19 @@ fn is_loopback(addr: SocketAddr) -> bool {
 /// Refuse unless this is a first run, from this machine. Returns the reason when it refuses, so a
 /// misconfigured setup says which of the two rules stopped it.
 async fn first_run_only(rt: &Rt, addr: SocketAddr) -> Option<Answer> {
+    // Loopback, or a device on one of this hub's own /24s within the claim window. See adopt.rs
+    // for why the loopback-only rule had to go (it required a desktop app ON the hub machine,
+    // which a headless Pi, a NAS or a container cannot have) and for the three bounds that make
+    // the LAN door acceptable.
+    if let Err(refusal) = crate::adopt::may_set_up(addr.ip(), &crate::linktap_discover::local_ipv4s(), rt.started.elapsed(), crate::adopt::ADOPTION_WINDOW) {
+        // LOG THE ATTEMPT WITH THE PEER. A hub that gets claimed on a shared marina network must be
+        // able to say by whom, and a hub that keeps refusing an owner who is one subnet away must
+        // be able to say that too — neither is answerable from the 403 alone.
+        crate::hlog!("setup: refused {} from {} ({:?})", addr.ip(), refusal.message(), refusal);
+        return Some(err(403, refusal.message()));
+    }
     if !is_loopback(addr) {
-        return Some(err(403, "a hub can only be set up from the computer it runs on"));
+        crate::hlog!("setup: LAN setup call from {} accepted (claim window open)", addr.ip());
     }
     // A DAMAGED config reads back as defaults, which look exactly like a first run — so without
     // this check the app would be invited to sign a hub whose real identity is still on disk, and
@@ -1427,6 +1452,17 @@ where
             }
         };
         crate::hlog!("hub: management API on 0.0.0.0:{port} ({})", if cfg.token.is_empty() { "unregistered — waiting for bootstrap" } else { "registered" });
+        // Say the claim window OUT LOUD on an unclaimed hub. This is the one line that makes a
+        // headless install self-explanatory: someone who has just run the installer over SSH sees
+        // how long they have and what to do if they miss it, without reading any documentation.
+        if cfg.token.is_empty() {
+            crate::hlog!(
+                "setup: this hub is UNCLAIMED and can be set up from this machine, or from any \
+                 device on its own LAN, for the next {} minutes — restart the service to reopen \
+                 the window",
+                crate::adopt::ADOPTION_WINDOW.as_secs() / 60
+            );
+        }
         tokio::spawn(heartbeat_loop(rt.clone()));
         tokio::spawn(key_sync_loop(rt.clone()));
         // The LinkTap poll floor. It re-reads its own configuration each pass, so a gateway
@@ -1848,23 +1884,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_first_run_door_is_shut_to_anything_off_box() {
+    async fn the_first_run_door_is_shut_to_anything_off_network() {
         // The server binds 127.0.0.1 in these tests, so a non-loopback peer cannot be produced by
         // dialling it. Test the decision itself instead — it is the whole rule.
+        //
+        // ⚠️ THE PEER HERE IS PUBLIC, NOT `192.168.8.50`, AND THAT MATTERS NOW. `first_run_only`
+        // consults the machine's REAL addresses, so an RFC1918 peer would pass or fail depending on
+        // what /24 the developer's laptop happens to be on — a test that passes by luck and fails
+        // on a colleague's network. The LAN branch is covered exhaustively and deterministically in
+        // adopt.rs, where the addresses are arguments rather than facts about the host.
         let base = temp_base("offbox");
         let rt = new_rt(base.clone(), "https://unused.example".into());
-        let lan: SocketAddr = "192.168.8.50:51000".parse().unwrap();
+        let off: SocketAddr = "203.0.113.9:51000".parse().unwrap();
         let local: SocketAddr = "127.0.0.1:51000".parse().unwrap();
-        assert!(!is_loopback(lan));
+        assert!(!is_loopback(off));
         assert!(is_loopback(local));
-        // Unconfigured + off-box ⇒ refused as a location problem, not as "already set up".
-        let refusal = first_run_only(&rt, lan).await.expect("must refuse");
+        // Unconfigured + off-network ⇒ refused as a location problem, not as "already set up".
+        let refusal = first_run_only(&rt, off).await.expect("must refuse");
         assert_eq!(refusal.status, 403);
+        assert!(refusal.body.contains("same local network"), "the refusal must say what WOULD work: {}", refusal.body);
         assert!(first_run_only(&rt, local).await.is_none(), "unconfigured + loopback is the open case");
-        // Configured ⇒ refused even on loopback.
+        // Configured ⇒ refused even on loopback. The claim door shuts for good once a hub is signed.
         hub_config::write_config_in(&base, &seeded_cfg()).unwrap();
         assert_eq!(first_run_only(&rt, local).await.expect("must refuse").status, 409);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn ping_says_whether_this_hub_can_be_adopted_and_whether_it_is_damaged() {
+        // Ping is the ONLY door a damaged or unclaimed hub can answer, and the app's LAN sweep has
+        // exactly one request to decide what it found. Both facts therefore live here.
+        let base = temp_base("pingadopt");
+        let (origin, _rt) = spawn_server(base.clone(), vec![]).await;
+        let c = reqwest::Client::new();
+
+        // Fresh and unclaimed: adoptable.
+        let v: serde_json::Value = c.get(format!("{origin}/api/hub/ping")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(v["registered"], false);
+        assert_eq!(v["adoptable"], true);
+        assert_eq!(v["configDamaged"], false);
+
+        // Signed: never adoptable again, whatever the window says.
+        hub_config::write_config_in(&base, &seeded_cfg()).unwrap();
+        let v: serde_json::Value = c.get(format!("{origin}/api/hub/ping")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(v["registered"], true);
+        assert_eq!(v["adoptable"], false);
+
+        // Damaged: NOT adoptable — the identity is still on disk and must not be signed over — and
+        // ping says so, because /api/hub/status cannot be reached when the member keys are in the
+        // file that will not parse. That is the gap this field exists to close.
+        std::fs::write(hub_config::config_path_in(&base), "{\"token\": \"hubtok-sec").unwrap();
+        let v: serde_json::Value = c.get(format!("{origin}/api/hub/ping")).send().await.unwrap().json().await.unwrap();
+        assert_eq!(v["registered"], false, "a damaged file reads as defaults");
+        assert_eq!(v["configDamaged"], true, "and ping is the only place that can say so");
+        assert_eq!(v["adoptable"], false, "damaged is not a first run — the real token is still there");
     }
 
     #[tokio::test]
