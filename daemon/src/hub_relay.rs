@@ -151,7 +151,7 @@ async fn apply_keys(rt: &Shared, keys: Vec<MemberKey>) {
     let mut cfg = hub_config::read_config_in(&rt.base);
     cfg.member_keys = keys;
     if let Err(e) = hub_config::write_config_in(&rt.base, &cfg) {
-        eprintln!("hub: could not persist pushed member keys: {e}");
+        crate::hlog!("hub: could not persist pushed member keys: {e}");
     }
 }
 
@@ -169,11 +169,11 @@ pub async fn run(rt: Shared) {
         }
         match serve_once(&rt, &cfg).await {
             Ok(()) => {
-                eprintln!("hub: relay socket closed; reconnecting");
+                crate::hlog!("hub: relay socket closed; reconnecting");
                 attempt = 0;
             }
             Err(e) => {
-                eprintln!("hub: relay socket failed: {}", redact(&e, &cfg.token));
+                crate::hlog!("hub: relay socket failed: {}", redact(&e, &cfg.token));
                 attempt = attempt.saturating_add(1);
             }
         }
@@ -187,7 +187,7 @@ async fn serve_once(rt: &Shared, cfg: &HubConfig) -> Result<(), String> {
     let (mut socket, _resp) = tokio_tungstenite::connect_async(&url)
         .await
         .map_err(|e| e.to_string())?;
-    eprintln!("hub: relay connected");
+    crate::hlog!("hub: relay connected");
     socket
         .send(Message::Text(hello_frame(cfg)))
         .await
@@ -208,7 +208,7 @@ async fn serve_once(rt: &Shared, cfg: &HubConfig) -> Result<(), String> {
         let Some(msg) = parse_worker_message(&text) else { continue };
         match msg {
             WorkerMessage::Keys(keys) => {
-                eprintln!("hub: member keys pushed ({})", keys.len());
+                crate::hlog!("hub: member keys pushed ({})", keys.len());
                 apply_keys(rt, keys).await;
             }
             WorkerMessage::Call { id, uid, role, method, path, body } => {

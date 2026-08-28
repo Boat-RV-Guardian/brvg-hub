@@ -12,7 +12,7 @@ fn main() {
     {
         if std::env::args().any(|a| a == "--service") {
             if let Err(e) = brvg_hub::win_service::run() {
-                eprintln!("hub: service dispatcher failed: {e}");
+                brvg_hub::hlog!("hub: service dispatcher failed: {e}");
                 std::process::exit(1);
             }
             return;
