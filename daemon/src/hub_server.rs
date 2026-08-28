@@ -231,6 +231,17 @@ pub fn router(rt: Shared) -> Router {
         // reading, which the next poll corrects — deliberately NOT in the relay allowlist, so it
         // is reachable only from the LAN.
         .route("/api/hub/linktap/push", post(h_linktap_push))
+        // LOCAL SHELLY INGEST — the flood sensor's webhook, pointed at the hub instead of (or as
+        // well as) the cloud. THE REASON THIS EXISTS: with LinkTap's cloud removed and a hub
+        // required for valve control (owner ruling 2026-08-27, option (a)), the cloud→hub close is
+        // wired — but a boat's flood is exactly the moment the uplink is least likely to be there.
+        // This is the close that does not touch the WAN at all.
+        //
+        // GET **AND** POST. Shelly devices fire GETs at a static URL; the cloud's own /api/shelly
+        // accepts both verbs for precisely this reason, and a 405-on-GET has bitten this project
+        // before — a route that looks healthy in every test and is silently unreachable by the
+        // only device that calls it.
+        .route("/api/hub/shelly", get(h_shelly).post(h_shelly))
         // First-run only, and only from this machine — see h_identity.
         .route("/api/hub/ping", get(h_ping))
         .route("/api/hub/identity", get(h_identity))
@@ -258,6 +269,13 @@ struct StatusBody {
     /// contains "linktap" (app #412 utils/valveExecutor) — absence is never read as capability, so
     /// an older daemon or an unpermitted vehicle simply keeps the app on its direct paths.
     capabilities: Vec<String>,
+    /// Is `/api/hub/shelly` armed — i.e. does this hub hold the vehicle's webhook secret?
+    ///
+    /// A BOOLEAN, never the secret. It exists because the alternative to answering this question
+    /// is a silently deaf flood path: a hub with no secret refuses every Shelly report (deny by
+    /// default — see hub_config::shelly_secret), and without this flag the app would have no way
+    /// to tell "no sensor has ever fired" from "every sensor has been refused for a month".
+    shelly_ingest_armed: bool,
 }
 
 async fn status_body(rt: &Rt) -> StatusBody {
@@ -275,6 +293,7 @@ async fn status_body(rt: &Rt) -> StatusBody {
         uptime_secs: rt.started.elapsed().as_secs(),
         keys_synced: rt.keys.read().await.len(),
         capabilities: capabilities_of(&cfg.linktap),
+        shelly_ingest_armed: !cfg.shelly_secret.is_empty(),
     }
 }
 
@@ -295,6 +314,12 @@ struct ConfigReq {
     name: Option<String>,
     heartbeat_secs: Option<u32>,
     enabled: Option<bool>,
+    /// The vehicle's Shelly webhook secret, handed over by the app so the hub can authenticate
+    /// local flood reports with the internet down (hub_config::shelly_secret). Sent here rather
+    /// than through a new endpoint because this is already the settings door, with the settings
+    /// role gate on it. An EMPTY string disarms the ingest deliberately — it is how a rotated or
+    /// mistakenly-set secret is taken back, and the status body reports the resulting state.
+    shelly_secret: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -390,6 +415,11 @@ async fn do_config(rt: &Rt, caller: &Caller, body: &[u8]) -> Answer {
         }
         if let Some(e) = req.enabled {
             cfg.enabled = e;
+        }
+        if let Some(sec) = req.shelly_secret {
+            // Trimmed, because it arrives from a copy/paste field in the app and a trailing
+            // newline would silently break every constant-time comparison against it.
+            cfg.shelly_secret = sec.trim().to_string();
         }
         if let Err(e) = hub_config::write_config_in(&rt.base, &cfg) {
             return err(500, &e);
@@ -618,6 +648,46 @@ async fn h_valve(State(rt): State<Shared>, headers: HeaderMap, body: axum::body:
 /// It reads the SAME `linktap.host` the poll loop dials, so the two cannot drift apart: if the
 /// gateway's DHCP address changes, polling breaks at the same moment pushes stop being accepted —
 /// one visible failure instead of a silent half-broken state. An unconfigured host accepts nothing.
+/// Is this peer on a network that could plausibly be the vessel's own?
+///
+/// ⚠️ WHY THIS EXISTS, AND WHY IT IS NOT REDUNDANT WITH THE SECRET. `/api/hub/shelly` closes valves
+/// and injects events into the owner's alert pipeline, and the server binds 0.0.0.0. Absence from
+/// the relay allowlist keeps it off the WORKER's path — it does NOT make it LAN-only. A marina
+/// router with 8722 port-forwarded (unusual, but a thing people do) would expose it to the internet
+/// with its secret travelling in a plaintext query string. The secret is the authority; this is the
+/// blast radius.
+///
+/// PERMISSIVE ON PURPOSE, and each range is here for a reason rather than copied from a list:
+///   * RFC1918 (10/8, 172.16/12, 192.168/16) — every ordinary boat LAN.
+///   * CGNAT (100.64/10) — Starlink and cellular routers hand these out, and on some of them the
+///     LAN side sits inside that range. Excluding it would refuse a real, common vessel setup.
+///   * loopback and link-local (169.254/16) — same machine, and DHCP-less auto-addressing.
+///   * IPv6 loopback, unique-local (fc00::/7) and link-local (fe80::/10), plus IPv4-mapped
+///     addresses, which is how a dual-stack listener reports an IPv4 peer.
+/// A refusal is LOGGED loudly by the caller: if some genuine network is being turned away, that log
+/// is the only way anyone would ever find out.
+fn shelly_peer_plausible(peer: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match peer {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || (o[0] == 100 && (64..128).contains(&o[1])) // 100.64/10 CGNAT
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return shelly_peer_plausible(IpAddr::V4(mapped));
+            }
+            let seg = v6.segments();
+            v6.is_loopback()
+                || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+        }
+    }
+}
+
 fn push_peer_allowed(host: &str, peer: SocketAddr) -> bool {
     if host.is_empty() {
         return false;
@@ -661,6 +731,208 @@ async fn h_linktap_push(
         }
     });
     (StatusCode::OK, "ok").into_response()
+}
+
+// --- Local Shelly ingest: the flood close that never touches the WAN -------------------------------
+//
+// AUTH, AND WHY IT IS NOT THE PUSH ROUTE'S ANSWER.
+//
+// `/api/hub/linktap/push` above is unauthenticated, and the comment there is careful about the one
+// fact that makes it acceptable: THE ROUTE IS INERT. It accepts no commands, changes no
+// configuration, and the worst a hostile LAN peer achieves with it is a wrong volume reading that
+// the next poll corrects.
+//
+// ⚠️ THIS ROUTE IS NOT INERT. It CLOSES A VALVE. The same reasoning therefore reaches the opposite
+// conclusion, and copying the push route's posture here would hand anyone on the boat's Wi-Fi —
+// or anyone who got onto it — a remote water shutoff for the price of one HTTP GET.
+//
+// So it is authenticated, in the only way a Shelly can be. A Shelly fires a STATIC URL: it cannot
+// present a header, cannot sign a request, cannot be given a client certificate. The strongest
+// credential it can carry is a bearer secret in the query string, which is exactly what the cloud
+// already does — `&k=<per-vehicle webhook secret>`, cloud-server `auth.ts` SEC-4. Reusing that
+// value and that spelling means pointing a sensor at the hub is a URL SWAP and nothing more: same
+// secret, same param, different host.
+//
+// The scheme, in full:
+//   1. `k` must equal the hub's stored `shelly_secret`, compared in constant time (`ct_eq`).
+//   2. An EMPTY stored secret REFUSES EVERYTHING. This is a deliberate divergence from the cloud,
+//      which treats an unset secret as `legacy` and accepts — that leniency is a phased rollout
+//      across vehicles provisioned before the scheme existed, and it is not a licence to close
+//      valves for strangers. Deny-by-default is the same posture as the empty key set, which 401s
+//      every management call until the first sync lands. `/api/hub/status` reports
+//      `shellyIngestArmed` so a disarmed hub is visible rather than silently deaf.
+//   3. `vid` must match this hub's vehicle. Checked AFTER the secret, so a prober cannot use the
+//      404 to enumerate which vehicle a hub belongs to.
+//   4. LAN ONLY. `/api/hub/shelly` is deliberately ABSENT from `dispatch`, which is the relay's
+//      path allowlist — the worker cannot reach this route down the WebSocket, so the query-string
+//      secret never leaves the boat's own network and there is no internet-facing door onto it.
+//
+// What this scheme does NOT claim: a LAN peer that can read the sensor's configured URL (or watch
+// the plaintext HTTP request go by) has the secret. That is true of the cloud path too, and it is
+// the ceiling of what a device with no crypto can do. The mitigation is the same one: the secret
+// is per-vehicle and rotatable, and the action behind it is a CLOSE, which spends no water and
+// removes no safety limit.
+
+/// One parsed Shelly webhook. Field-for-field the shape the cloud's `/api/shelly` reads out of its
+/// searchParams, so a sensor URL is portable between the two without editing.
+#[derive(Debug, PartialEq)]
+pub struct ShellyCall {
+    pub vid: String,
+    pub event: String,
+    pub device: String,
+    /// The per-vehicle webhook secret. NEVER forwarded and never logged.
+    pub k: String,
+    /// Everything else the device sent, in wire order — battery, temperature, whatever the model
+    /// puts in its URL. Passed through to the cloud untouched so the alert pipeline sees exactly
+    /// what a direct-to-cloud report would have carried.
+    pub extras: Vec<(String, String)>,
+}
+
+/// Routing/auth params, never telemetry — the Rust twin of events.ts `RESERVED_PARAMS`. `k` is on
+/// this list for a reason that outranks tidiness: it is the SECRET, and forwarding it would write
+/// the vehicle's webhook bearer into a cloud telemetry document.
+const SHELLY_RESERVED: [&str; 5] = ["vid", "event", "device", "key", "k"];
+
+/// PURE: read a Shelly webhook's query string.
+///
+/// `event` defaults to "sensor alert" and `device` to "unknown", matching the cloud's defaults
+/// exactly — a device that omits either must classify identically on both paths, or the same
+/// sensor would behave differently depending on which URL it was given.
+pub fn parse_shelly_query(raw_query: &str) -> ShellyCall {
+    let mut call = ShellyCall {
+        vid: String::new(),
+        event: String::new(),
+        device: String::new(),
+        k: String::new(),
+        extras: Vec::new(),
+    };
+    for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
+        match key.as_ref() {
+            "vid" => call.vid = value.into_owned(),
+            "event" => call.event = value.into_owned(),
+            "device" => call.device = value.into_owned(),
+            "k" => call.k = value.into_owned(),
+            _ if SHELLY_RESERVED.contains(&key.as_ref()) => {}
+            // Unset placeholders are dropped the way the cloud drops them, so a template the
+            // installer never filled in does not become a telemetry field reading "null".
+            _ if value.is_empty() || value == "null" => {}
+            _ => call.extras.push((key.into_owned(), value.into_owned())),
+        }
+    }
+    if call.event.is_empty() {
+        call.event = "sensor alert".into();
+    }
+    if call.device.is_empty() {
+        call.device = "unknown".into();
+    }
+    call
+}
+
+/// The outcome of authenticating one Shelly report.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ShellyAuth {
+    Ok,
+    /// This hub holds no webhook secret, so it can authenticate nothing. Deny by default.
+    Disarmed,
+    /// A secret is set and `k` is missing or wrong.
+    BadSecret,
+    /// Authenticated, but the report names a different vehicle.
+    WrongVehicle,
+}
+
+/// PURE: may this report act on this hub?
+///
+/// Order is load-bearing. The SECRET is checked first, so an unauthenticated prober gets the same
+/// 401 whatever `vid` it guessed and cannot use the vehicle check as an oracle. The empty-secret
+/// case is its own variant rather than folded into `BadSecret` because the operator fix is
+/// completely different — one is "the sensor has the wrong URL", the other is "nobody has told
+/// this hub the secret yet" — and the log line has to be able to say which.
+pub fn classify_shelly_auth(cfg_vid: &str, cfg_secret: &str, call: &ShellyCall) -> ShellyAuth {
+    if cfg_secret.is_empty() {
+        return ShellyAuth::Disarmed;
+    }
+    if !ct_eq(cfg_secret, &call.k) {
+        return ShellyAuth::BadSecret;
+    }
+    // An omitted vid is accepted: the hub has exactly one vehicle, so there is nothing to route
+    // and the secret has already proved which vehicle this is. A vid that is present and WRONG is
+    // refused — that is a misconfigured sensor, and quietly filing its floods under this vehicle
+    // would be worse than saying no.
+    if !call.vid.is_empty() && !cfg_vid.is_empty() && call.vid != cfg_vid {
+        return ShellyAuth::WrongVehicle;
+    }
+    ShellyAuth::Ok
+}
+
+async fn h_shelly(
+    State(rt): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    raw: axum::extract::RawQuery,
+) -> Response {
+    let call = parse_shelly_query(raw.0.as_deref().unwrap_or(""));
+    // Blast radius before authority — see shelly_peer_plausible. Checked FIRST because it is the
+    // cheapest test and it discloses nothing: an off-LAN caller learns only that it is off-LAN,
+    // which it already knew, and never whether it guessed a secret.
+    if !shelly_peer_plausible(peer.ip()) {
+        eprintln!(
+            "shelly: REFUSED a '{}' report from {} — that peer is not on a plausible vessel network. \
+             If this is a real boat LAN the address range needs adding to shelly_peer_plausible.",
+            call.event, peer.ip()
+        );
+        return answer_response(err(403, "not a local caller"));
+    }
+    let cfg = hub_config::read_config_in(&rt.base);
+    match classify_shelly_auth(&cfg.vid, &cfg.shelly_secret, &call) {
+        ShellyAuth::Ok => {}
+        ShellyAuth::Disarmed => {
+            // LOUD, because the failure is invisible from the outside: every flood report this hub
+            // receives is being refused, and the sensor has no way to tell anyone.
+            eprintln!(
+                "shelly: REFUSED a '{}' report from {} — this hub holds no webhook secret. Set it in the app (hub settings) or the local flood close CANNOT run.",
+                call.event, call.device
+            );
+            return answer_response(err(401, "this hub has no webhook secret configured"));
+        }
+        ShellyAuth::BadSecret => {
+            eprintln!("shelly: refused a '{}' report from {} — wrong or missing k", call.event, call.device);
+            return answer_response(err(401, "missing or wrong webhook secret"));
+        }
+        ShellyAuth::WrongVehicle => {
+            return answer_response(err(404, "that vehicle is not this hub's"));
+        }
+    }
+
+    let flood = crate::linktap_runtime::is_flood_shutoff(&call.event);
+    if flood {
+        eprintln!("shelly: FLOOD — '{}' from {} — closing every valve NOW", call.event, call.device);
+    }
+
+    // Answer FIRST, act after — the same discipline as the gateway push route, for a sharper
+    // reason. A Shelly's webhook has a short timeout and retries on it; making the sensor wait out
+    // a stop-and-confirm loop against a 15-second gateway timeout would produce a retry storm on
+    // top of a flood. The spawned task starts immediately, so "before anything else" is measured
+    // in microseconds, not in a round trip.
+    tokio::spawn(async move {
+        // ⚠️ THE CLOSE COMES FIRST, UNCONDITIONALLY, AND BEFORE ANY NETWORK CALL. Not after the
+        // forward, not concurrently with it: the entire reason this route exists is the case where
+        // the uplink is down, and a close that waits on an unreachable cloud is a close that never
+        // happens. linktap_flood_stop_all is not tier-gated — see its own comment.
+        if flood {
+            linktap_flood_stop_all(&rt).await;
+        }
+        // Then forward to the cloud, best-effort, through the SAME /api/agent spool the heartbeat
+        // and every LinkTap report already use — one uplink, not two. The ORIGINAL event name and
+        // device id ride through untouched so the cloud's alert pipeline classifies, throttles,
+        // pushes and logs this exactly as it does a report that reached it directly. A hub in the
+        // path must be invisible to that pipeline.
+        spool_report(&rt, &crate::linktap_runtime::Report {
+            device: call.device.clone(),
+            event: call.event.clone(),
+            params: call.extras.clone(),
+        })
+        .await;
+    });
+    answer_response(ok_json(&serde_json::json!({ "ok": true })))
 }
 
 // --- Loops --------------------------------------------------------------------------------------
@@ -897,9 +1169,17 @@ async fn linktap_act(
     }
 }
 
-/// The poll floor.
+/// The poll floor — and, since this loop is the only thing on the boat that ever talks to the
+/// gateway, the GATEWAY-REACHABILITY WATCH as well.
+///
+/// The watch lives as a local across iterations rather than on `Rt` on purpose: nothing else needs
+/// to see it, and an episode belongs to one polling run of one gateway. It is RESET when the
+/// configured gateway changes, because an outage attributed to a gateway the hub no longer polls
+/// is not an outage of anything.
 async fn linktap_poll_loop(rt: Shared) {
     let client = http_client();
+    let mut watch = crate::linktap_runtime::GatewayWatch::default();
+    let mut watching = String::new();
     loop {
         if linktap_sync_config(&rt).await {
             let (gw, ids) = {
@@ -909,8 +1189,19 @@ async fn linktap_poll_loop(rt: Shared) {
                     None => (linktap::Gateway { host: String::new(), gw_id: String::new() }, Vec::new()),
                 }
             };
+            let key = format!("{}@{}", gw.gw_id, gw.host);
+            if key != watching {
+                watching = key;
+                watch = crate::linktap_runtime::GatewayWatch::default();
+            }
+            // Did the GATEWAY answer this pass, whatever it said about any individual valve? One
+            // reply is enough: a gateway that replied about one valve is reachable, and a `ret: 5`
+            // on another valve is a flat battery, not an outage. `None` means we asked nothing —
+            // no valves configured — which must not be read as silence from the gateway.
+            let mut reached: Option<bool> = None;
             for id in ids {
                 let reply = linktap::post_command(&client, &gw, &linktap::build_status(&gw, &id)).await;
+                reached = Some(reached.unwrap_or(false) || linktap::reply_reached_gateway(&reply));
                 if !reply.ok {
                     continue; // an unreachable gateway is the poll loop's normal weather
                 }
@@ -928,6 +1219,14 @@ async fn linktap_poll_loop(rt: Shared) {
                 };
                 linktap_act(&rt, &client, &id, action, reports).await;
             }
+            if let Some(reached) = reached {
+                let (next, report) = crate::linktap_runtime::gateway_watch_step(watch, &gw, reached, now_ms());
+                watch = next;
+                if let Some(r) = report {
+                    eprintln!("linktap: gateway {} — {}", gw.host, r.event);
+                    spool_report(&rt, &r).await;
+                }
+            }
         }
         tokio::time::sleep(Duration::from_secs(LINKTAP_POLL_SECS)).await;
     }
@@ -936,13 +1235,51 @@ async fn linktap_poll_loop(rt: Shared) {
 /// Close every watched valve — the flood hook. The close must not wait on the WAN: with the
 /// LinkTap cloud gone this is the only automated close path when the uplink is down. The valve
 /// self-limits regardless (every open carries duration+volume), so this only ever closes it sooner.
+///
+/// ⚠️⚠️ THIS PATH IS DELIBERATELY **NOT** TIER-GATED, AND THAT IS A BREAK FROM WHAT WAS HERE.
+///
+/// It used to be, silently. The only source of (gateway, dev_ids) was `rt.linktap`, and that
+/// machine is built by `linktap_sync_config` ONLY when `cfg.linktap.allowed` is true — the paid
+/// gate the cloud caches. So on a vehicle whose plan does not include valve control, or whose plan
+/// lapsed, or which has simply never had a successful heartbeat since boot (`allowed` defaults to
+/// FALSE, correctly, everywhere else), this function found `None` and RETURNED WITHOUT CLOSING
+/// ANYTHING. A flood alarm would have been logged and billed and nothing would have shut the water
+/// off. Nobody noticed because nothing called this function.
+///
+/// The gate is right for `do_valve` and stays there: OPENING a valve is a paid feature, an open
+/// carries duration+volume limits, and a hub deciding entitlement locally would be the way around
+/// a cloud-side rule. CLOSING is the opposite of all three. It spends no water, it removes no
+/// safety limit, it is idempotent (a `cmd 7` to a shut valve is a no-op), and the worst outcome of
+/// running it on an unentitled vehicle is that a boat which was going to flood does not. There is
+/// no revenue to protect on the closing side of a valve.
+///
+/// So: the machine supplies the gateway when it exists (it also carries `note_stop`, which is what
+/// makes the eventual close classify as `flood_shutoff` rather than `unknown`), and when it does
+/// not, the CONFIGURED gateway is used directly — `allowed` unread.
 pub async fn linktap_flood_stop_all(rt: &Rt) {
     let client = http_client();
     let (gw, ids) = {
         let guard = rt.linktap.lock().await;
         match guard.as_ref() {
             Some(r) => (r.gateway.clone(), r.dev_ids()),
-            None => return,
+            // No running machine — unpermitted plan, or a hub that has not heard from the cloud
+            // yet. Fall through to the stored configuration rather than giving up on the close.
+            None => {
+                let cfg = hub_config::read_config_in(&rt.base);
+                let lt = cfg.linktap;
+                let ids: Vec<String> =
+                    lt.dev_ids.iter().map(|d| linktap::normalize_dev_id(d)).filter(|d| !d.is_empty()).collect();
+                if lt.host.is_empty() || lt.gw_id.is_empty() || ids.is_empty() {
+                    // Genuinely nothing to close: no gateway address, no valves. Say so — a flood
+                    // alarm that reached a hub with no valve to shut is worth a log line.
+                    eprintln!("linktap: FLOOD SHUTOFF requested but this hub has no gateway/valves configured");
+                    return;
+                }
+                eprintln!(
+                    "linktap: FLOOD SHUTOFF with no running machine (plan not permitted, or no heartbeat yet) — closing anyway from the stored configuration"
+                );
+                (linktap::Gateway { host: lt.host, gw_id: lt.gw_id }, ids)
+            }
         }
     };
     for id in ids {
@@ -1693,6 +2030,253 @@ mod tests {
         // A HOSTNAME cannot be compared without a DNS lookup per push, so that configuration keeps
         // the pre-check posture and relies on the route's inertness. Stated, not silently assumed.
         assert!(push_peer_allowed("gateway.local", other));
+    }
+
+    // --- Local Shelly ingest ---------------------------------------------------------------------
+
+    #[test]
+    fn a_shelly_query_parses_into_the_same_shape_the_cloud_reads() {
+        let c = parse_shelly_query("vid=v1&event=flood.alarm&device=sh_bilge&k=s3cr3t&battery=97&temp=21.5");
+        assert_eq!(c.vid, "v1");
+        assert_eq!(c.event, "flood.alarm");
+        assert_eq!(c.device, "sh_bilge");
+        assert_eq!(c.k, "s3cr3t");
+        assert_eq!(c.extras, vec![("battery".to_string(), "97".to_string()), ("temp".to_string(), "21.5".to_string())]);
+        // ⚠️ THE SECRET MUST NEVER REACH THE EXTRAS. They are forwarded to the cloud verbatim and
+        // stored as telemetry, so a `k` that leaked into them would write the vehicle's webhook
+        // bearer into a document every member can read.
+        assert!(c.extras.iter().all(|(k, _)| k != "k" && k != "key"));
+    }
+
+    #[test]
+    fn a_plausible_vessel_network_is_admitted_and_the_public_internet_is_not() {
+        use std::net::IpAddr;
+        let ok = [
+            "192.168.1.50", "10.0.0.9", "172.16.4.2", "127.0.0.1",
+            "169.254.10.1",           // DHCP-less auto-address
+            "100.64.0.5", "100.127.255.254", // CGNAT, both edges — Starlink/cellular LANs live here
+            "::1", "fd00::1", "fe80::1",
+            "::ffff:192.168.1.50",    // how a dual-stack listener reports an IPv4 peer
+        ];
+        for a in ok {
+            assert!(shelly_peer_plausible(a.parse::<IpAddr>().unwrap()), "{a} should be admitted");
+        }
+        let refused = [
+            "8.8.8.8", "1.1.1.1", "203.0.113.7",
+            "100.63.255.255", "100.128.0.0", // just OUTSIDE CGNAT, both sides
+            "2606:4700::1111",
+        ];
+        for a in refused {
+            assert!(!shelly_peer_plausible(a.parse::<IpAddr>().unwrap()), "{a} must be refused");
+        }
+    }
+
+    #[test]
+    fn shelly_defaults_match_the_clouds_exactly() {
+        // A sensor that omits event/device must classify identically whichever URL it was given,
+        // or the same device behaves differently on the hub than it does direct to the cloud.
+        let c = parse_shelly_query("vid=v1&k=s");
+        assert_eq!(c.event, "sensor alert");
+        assert_eq!(c.device, "unknown");
+        // An unfilled installer template must not become a telemetry field reading "null".
+        let c = parse_shelly_query("k=s&battery=&signal=null&real=3");
+        assert_eq!(c.extras, vec![("real".to_string(), "3".to_string())]);
+        // A completely empty query is a parse, not a panic.
+        assert_eq!(parse_shelly_query("").event, "sensor alert");
+    }
+
+    #[test]
+    fn shelly_auth_is_deny_by_default_and_checks_the_secret_before_the_vehicle() {
+        let call = |vid: &str, k: &str| parse_shelly_query(&format!("vid={vid}&event=flood&device=d&k={k}"));
+        // No stored secret ⇒ NOTHING is accepted. This is the deliberate divergence from the
+        // cloud's `legacy` accept-when-unset: that leniency is a rollout for pre-existing
+        // vehicles, and this route closes a valve.
+        assert_eq!(classify_shelly_auth("v1", "", &call("v1", "s3cr3t")), ShellyAuth::Disarmed);
+        assert_eq!(classify_shelly_auth("v1", "", &call("v1", "")), ShellyAuth::Disarmed);
+        // Wrong or missing k.
+        assert_eq!(classify_shelly_auth("v1", "s3cr3t", &call("v1", "nope")), ShellyAuth::BadSecret);
+        assert_eq!(classify_shelly_auth("v1", "s3cr3t", &call("v1", "")), ShellyAuth::BadSecret);
+        assert_eq!(classify_shelly_auth("v1", "s3cr3t", &call("v1", "S3CR3T")), ShellyAuth::BadSecret);
+        // Right secret, right vehicle.
+        assert_eq!(classify_shelly_auth("v1", "s3cr3t", &call("v1", "s3cr3t")), ShellyAuth::Ok);
+        // An omitted vid is fine — the hub has one vehicle and the secret already proved which.
+        assert_eq!(classify_shelly_auth("v1", "s3cr3t", &parse_shelly_query("k=s3cr3t&event=flood")), ShellyAuth::Ok);
+        // A vid that is present and WRONG is a misconfigured sensor, not this vehicle's flood.
+        assert_eq!(classify_shelly_auth("v1", "s3cr3t", &call("v-other", "s3cr3t")), ShellyAuth::WrongVehicle);
+        // ...but a prober with the wrong secret can never learn that, whatever vid it guesses.
+        assert_eq!(classify_shelly_auth("v1", "s3cr3t", &call("v-other", "nope")), ShellyAuth::BadSecret);
+    }
+
+    fn shelly_cfg(secret: &str) -> HubConfig {
+        HubConfig { shelly_secret: secret.into(), ..valve_cfg(true) }
+    }
+
+    #[tokio::test]
+    async fn the_shelly_route_answers_a_get_as_well_as_a_post() {
+        // ⚠️ THE 405 BUG, pinned. Shelly devices fire GETs at a static URL; a POST-only route
+        // looks perfectly healthy in every test that uses reqwest's `.post()` and is silently
+        // unreachable by the only device that ever calls it. This project has shipped that once.
+        let base = temp_base("shelly_verbs");
+        hub_config::write_config_in(&base, &shelly_cfg("s3cr3t")).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![]).await;
+        let c = reqwest::Client::new();
+        let url = format!("{origin}/api/hub/shelly?vid=v1&event=voltmeter.measurement&device=sh_1&k=s3cr3t");
+        assert_eq!(c.get(&url).send().await.unwrap().status(), 200, "a Shelly GET must not 405");
+        assert_eq!(c.post(&url).send().await.unwrap().status(), 200);
+    }
+
+    #[tokio::test]
+    async fn the_shelly_route_is_not_the_push_routes_open_door() {
+        // /api/hub/linktap/push is unauthenticated because it is INERT. This one closes a valve,
+        // so the same reasoning reaches the opposite answer: no secret, no action.
+        let base = temp_base("shelly_auth");
+        hub_config::write_config_in(&base, &shelly_cfg("s3cr3t")).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![]).await;
+        let c = reqwest::Client::new();
+        for q in ["vid=v1&event=flood.alarm&device=sh_bilge", "vid=v1&event=flood.alarm&device=sh_bilge&k=wrong"] {
+            let r = c.get(format!("{origin}/api/hub/shelly?{q}")).send().await.unwrap();
+            assert_eq!(r.status(), 401, "an unauthenticated flood report must not reach the valve: {q}");
+        }
+        // A hub that holds no secret refuses even a well-formed report — deny by default.
+        let base2 = temp_base("shelly_disarmed");
+        hub_config::write_config_in(&base2, &valve_cfg(true)).unwrap(); // shelly_secret empty
+        let (origin2, _rt2) = spawn_server(base2, vec![]).await;
+        let r = c.get(format!("{origin2}/api/hub/shelly?vid=v1&event=flood.alarm&device=d&k=anything")).send().await.unwrap();
+        assert_eq!(r.status(), 401);
+        // A report for somebody else's vehicle is refused too, even with the right secret.
+        let r = c.get(format!("{origin}/api/hub/shelly?vid=v-other&event=flood.alarm&device=d&k=s3cr3t")).send().await.unwrap();
+        assert_eq!(r.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn the_shelly_route_is_lan_only_and_unreachable_down_the_relay() {
+        // `dispatch` IS the relay's path allowlist (hub_relay.rs routes every worker `call` frame
+        // through it). Keeping /api/hub/shelly out of it is what makes the query-string secret a
+        // LAN-only credential instead of one with an internet-facing door onto it.
+        let base = temp_base("shelly_relay");
+        hub_config::write_config_in(&base, &shelly_cfg("s3cr3t")).unwrap();
+        let rt = new_rt(base, "https://unused.example".into());
+        let owner = Caller { uid: "u1".into(), role: "owner".into() };
+        for m in ["GET", "POST"] {
+            let a = dispatch(&rt, &owner, m, "/api/hub/shelly", b"").await;
+            assert_eq!(a.status, 404, "{m} /api/hub/shelly must not be relayable");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_webhook_secret_is_set_through_config_and_never_read_back() {
+        let base = temp_base("shelly_secret_cfg");
+        hub_config::write_config_in(&base, &seeded_cfg()).unwrap();
+        let (origin, _rt) = spawn_server(base.clone(), vec![key("monitor"), key("admin")]).await;
+        let c = reqwest::Client::new();
+
+        // Settings grade, like every other field on this endpoint.
+        let r = c.post(format!("{origin}/api/hub/config")).header(KEY_HEADER, key("monitor").key)
+            .json(&serde_json::json!({"shellySecret": "s3cr3t"})).send().await.unwrap();
+        assert_eq!(r.status(), 403);
+        assert!(hub_config::read_config_in(&base).shelly_secret.is_empty());
+
+        let r = c.post(format!("{origin}/api/hub/config")).header(KEY_HEADER, key("admin").key)
+            .json(&serde_json::json!({"shellySecret": "  s3cr3t\n"})).send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(hub_config::read_config_in(&base).shelly_secret, "s3cr3t", "trimmed — a pasted newline must not break every comparison");
+        // The status body says the ingest is ARMED and does not contain the secret itself.
+        let text = r.text().await.unwrap();
+        assert!(!text.contains("s3cr3t"), "the webhook secret leaked into status: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["shellyIngestArmed"], true);
+
+        // Empty disarms it deliberately — that is how a rotated secret is taken back.
+        let r = c.post(format!("{origin}/api/hub/config")).header(KEY_HEADER, key("admin").key)
+            .json(&serde_json::json!({"shellySecret": ""})).send().await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["shellyIngestArmed"], false);
+        assert!(hub_config::read_config_in(&base).shelly_secret.is_empty());
+    }
+
+    /// A stub LinkTap gateway that counts the `cmd 7` (stop) commands it is sent.
+    async fn stub_gateway() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let stops = Arc::new(AtomicUsize::new(0));
+        let seen = stops.clone();
+        let app = Router::new().route(
+            "/api.shtml",
+            post(move |body: axum::body::Bytes| {
+                let seen = seen.clone();
+                async move {
+                    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+                    if v.get("cmd").and_then(|c| c.as_i64()) == Some(7) {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                    }
+                    axum::Json(serde_json::json!({ "ret": 0 }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (addr.to_string(), stops)
+    }
+
+    #[tokio::test]
+    async fn a_flood_close_is_NOT_blocked_by_the_paid_tier_gate() {
+        use std::sync::atomic::Ordering;
+        // ⚠️ THIS IS THE BREAK. Before this change the ONLY source of (gateway, valves) for the
+        // flood hook was `rt.linktap`, which linktap_sync_config builds only when
+        // `cfg.linktap.allowed` is true — so on an unpermitted plan, a lapsed plan, or simply a
+        // hub that had not yet had a successful heartbeat (allowed defaults to FALSE), a flood
+        // alarm would have closed NOTHING. Opening a valve is a paid feature; closing one spends
+        // no water, removes no limit, and is idempotent. There is no revenue on the closing side.
+        let (host, stops) = stub_gateway().await;
+        let base = temp_base("flood_no_gate");
+        let mut cfg = valve_cfg(false); // allowed = FALSE, the unpermitted plan
+        cfg.linktap.host = host;
+        hub_config::write_config_in(&base, &cfg).unwrap();
+        let rt = new_rt(base, "https://unused.example".into());
+        // The machine is NOT built on an unpermitted plan — that is the whole trap.
+        assert!(!linktap_sync_config(&rt).await);
+        assert!(rt.linktap.lock().await.is_none());
+
+        linktap_flood_stop_all(&rt).await;
+        assert_eq!(stops.load(Ordering::SeqCst), 1, "an unpermitted plan must still get its valve CLOSED");
+    }
+
+    #[tokio::test]
+    async fn a_flood_close_with_no_gateway_at_all_is_a_log_line_not_a_panic() {
+        let base = temp_base("flood_nogw");
+        hub_config::write_config_in(&base, &seeded_cfg()).unwrap(); // no linktap config whatsoever
+        let rt = new_rt(base, "https://unused.example".into());
+        linktap_flood_stop_all(&rt).await; // must simply return
+    }
+
+    #[tokio::test]
+    async fn a_flood_report_closes_the_valve_and_a_measurement_does_not() {
+        use std::sync::atomic::Ordering;
+        let (host, stops) = stub_gateway().await;
+        let base = temp_base("shelly_flood");
+        let mut cfg = shelly_cfg("s3cr3t");
+        cfg.linktap.host = host;
+        cfg.token = String::new(); // no uplink: spool_report is a no-op, and the close must not care
+        hub_config::write_config_in(&base, &cfg).unwrap();
+        let (origin, rt) = spawn_server(base, vec![]).await;
+        linktap_sync_config(&rt).await;
+        let c = reqwest::Client::new();
+
+        // Telemetry from the same sensor must NOT touch the valve.
+        let r = c.get(format!("{origin}/api/hub/shelly?vid=v1&event=voltmeter.measurement&device=sh_bilge&k=s3cr3t"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        // A real flood does.
+        let r = c.get(format!("{origin}/api/hub/shelly?vid=v1&event=flood.alarm&device=sh_bilge&k=s3cr3t&battery=97"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        // The work is spawned so the sensor is never made to wait out a gateway round trip; give
+        // it a moment to land rather than asserting on a race.
+        for _ in 0..100 {
+            if stops.load(Ordering::SeqCst) > 0 { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(stops.load(Ordering::SeqCst), 1, "a flood must close the valve; a measurement must not");
     }
 
     #[tokio::test]
