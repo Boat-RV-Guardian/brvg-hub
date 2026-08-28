@@ -648,6 +648,46 @@ async fn h_valve(State(rt): State<Shared>, headers: HeaderMap, body: axum::body:
 /// It reads the SAME `linktap.host` the poll loop dials, so the two cannot drift apart: if the
 /// gateway's DHCP address changes, polling breaks at the same moment pushes stop being accepted —
 /// one visible failure instead of a silent half-broken state. An unconfigured host accepts nothing.
+/// Is this peer on a network that could plausibly be the vessel's own?
+///
+/// ⚠️ WHY THIS EXISTS, AND WHY IT IS NOT REDUNDANT WITH THE SECRET. `/api/hub/shelly` closes valves
+/// and injects events into the owner's alert pipeline, and the server binds 0.0.0.0. Absence from
+/// the relay allowlist keeps it off the WORKER's path — it does NOT make it LAN-only. A marina
+/// router with 8722 port-forwarded (unusual, but a thing people do) would expose it to the internet
+/// with its secret travelling in a plaintext query string. The secret is the authority; this is the
+/// blast radius.
+///
+/// PERMISSIVE ON PURPOSE, and each range is here for a reason rather than copied from a list:
+///   * RFC1918 (10/8, 172.16/12, 192.168/16) — every ordinary boat LAN.
+///   * CGNAT (100.64/10) — Starlink and cellular routers hand these out, and on some of them the
+///     LAN side sits inside that range. Excluding it would refuse a real, common vessel setup.
+///   * loopback and link-local (169.254/16) — same machine, and DHCP-less auto-addressing.
+///   * IPv6 loopback, unique-local (fc00::/7) and link-local (fe80::/10), plus IPv4-mapped
+///     addresses, which is how a dual-stack listener reports an IPv4 peer.
+/// A refusal is LOGGED loudly by the caller: if some genuine network is being turned away, that log
+/// is the only way anyone would ever find out.
+fn shelly_peer_plausible(peer: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match peer {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || (o[0] == 100 && (64..128).contains(&o[1])) // 100.64/10 CGNAT
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return shelly_peer_plausible(IpAddr::V4(mapped));
+            }
+            let seg = v6.segments();
+            v6.is_loopback()
+                || (seg[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (seg[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+        }
+    }
+}
+
 fn push_peer_allowed(host: &str, peer: SocketAddr) -> bool {
     if host.is_empty() {
         return false;
@@ -824,8 +864,23 @@ pub fn classify_shelly_auth(cfg_vid: &str, cfg_secret: &str, call: &ShellyCall) 
     ShellyAuth::Ok
 }
 
-async fn h_shelly(State(rt): State<Shared>, raw: axum::extract::RawQuery) -> Response {
+async fn h_shelly(
+    State(rt): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    raw: axum::extract::RawQuery,
+) -> Response {
     let call = parse_shelly_query(raw.0.as_deref().unwrap_or(""));
+    // Blast radius before authority — see shelly_peer_plausible. Checked FIRST because it is the
+    // cheapest test and it discloses nothing: an off-LAN caller learns only that it is off-LAN,
+    // which it already knew, and never whether it guessed a secret.
+    if !shelly_peer_plausible(peer.ip()) {
+        eprintln!(
+            "shelly: REFUSED a '{}' report from {} — that peer is not on a plausible vessel network. \
+             If this is a real boat LAN the address range needs adding to shelly_peer_plausible.",
+            call.event, peer.ip()
+        );
+        return answer_response(err(403, "not a local caller"));
+    }
     let cfg = hub_config::read_config_in(&rt.base);
     match classify_shelly_auth(&cfg.vid, &cfg.shelly_secret, &call) {
         ShellyAuth::Ok => {}
@@ -1991,6 +2046,29 @@ mod tests {
         // stored as telemetry, so a `k` that leaked into them would write the vehicle's webhook
         // bearer into a document every member can read.
         assert!(c.extras.iter().all(|(k, _)| k != "k" && k != "key"));
+    }
+
+    #[test]
+    fn a_plausible_vessel_network_is_admitted_and_the_public_internet_is_not() {
+        use std::net::IpAddr;
+        let ok = [
+            "192.168.1.50", "10.0.0.9", "172.16.4.2", "127.0.0.1",
+            "169.254.10.1",           // DHCP-less auto-address
+            "100.64.0.5", "100.127.255.254", // CGNAT, both edges — Starlink/cellular LANs live here
+            "::1", "fd00::1", "fe80::1",
+            "::ffff:192.168.1.50",    // how a dual-stack listener reports an IPv4 peer
+        ];
+        for a in ok {
+            assert!(shelly_peer_plausible(a.parse::<IpAddr>().unwrap()), "{a} should be admitted");
+        }
+        let refused = [
+            "8.8.8.8", "1.1.1.1", "203.0.113.7",
+            "100.63.255.255", "100.128.0.0", // just OUTSIDE CGNAT, both sides
+            "2606:4700::1111",
+        ];
+        for a in refused {
+            assert!(!shelly_peer_plausible(a.parse::<IpAddr>().unwrap()), "{a} must be refused");
+        }
     }
 
     #[test]
