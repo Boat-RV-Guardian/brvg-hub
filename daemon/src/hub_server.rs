@@ -277,11 +277,20 @@ struct StatusBody {
     /// default — see hub_config::shelly_secret), and without this flag the app would have no way
     /// to tell "no sensor has ever fired" from "every sensor has been refused for a month".
     shelly_ingest_armed: bool,
+    /// Why this hub's configuration could not be read, when it could not be.
+    ///
+    /// A damaged file reads back as DEFAULTS, so without this field a wedged hub is
+    /// indistinguishable from a factory-fresh one: `registered:false`, no capabilities, no
+    /// explanation — which is exactly how a real hub presented for hours after three BOM bytes
+    /// landed in its `hub.json`. `None` in the normal case, so nothing changes for a healthy hub.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_damaged: Option<String>,
 }
 
 async fn status_body(rt: &Rt) -> StatusBody {
     let cfg = hub_config::read_config_in(&rt.base);
     StatusBody {
+        config_damaged: hub_config::config_damage_in(&rt.base),
         registered: !cfg.token.is_empty(),
         hub_id: cfg.hub_id,
         vid: cfg.vid,
@@ -549,6 +558,12 @@ fn is_loopback(addr: SocketAddr) -> bool {
 async fn first_run_only(rt: &Rt, addr: SocketAddr) -> Option<Answer> {
     if !is_loopback(addr) {
         return Some(err(403, "a hub can only be set up from the computer it runs on"));
+    }
+    // A DAMAGED config reads back as defaults, which look exactly like a first run — so without
+    // this check the app would be invited to sign a hub whose real identity is still on disk, and
+    // the write would be refused half way through setup with a confusing 500. Say the true reason.
+    if let Some(why) = hub_config::config_damage_in(&rt.base) {
+        return Some(err(409, &format!("this hub's configuration is damaged and must be repaired or removed first: {why}")));
     }
     let cfg = hub_config::read_config_in(&rt.base);
     if !cfg.vid.is_empty() || !cfg.token.is_empty() {
@@ -1655,6 +1670,34 @@ mod tests {
         assert_eq!(v["registered"], true);
         assert_eq!(v["heartbeatSecs"], 60);
         assert_eq!(v["keysSynced"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_damaged_config_is_reported_and_cannot_be_silently_re_signed() {
+        // THE CENTRAL FAILURE OF 2026-08-28, as an endpoint test. A hub.json that will not parse
+        // reads back as defaults, so the hub USED to present as factory-fresh: not registered, no
+        // capabilities, no reason given, and one setup flow away from overwriting the real token.
+        let base = temp_base("damaged");
+        hub_config::write_config_in(&base, &seeded_cfg()).unwrap();
+        std::fs::write(hub_config::config_path_in(&base), "{\"vid\": \"v1\", \"token\": \"hubtok-sec").unwrap();
+
+        let (origin, _rt) = spawn_server(base.clone(), vec![key("monitor")]).await;
+        let c = reqwest::Client::new();
+
+        // Status SAYS SO instead of quietly presenting an unregistered hub.
+        let r = c.get(format!("{origin}/api/hub/status")).header(KEY_HEADER, key("monitor").key).send().await.unwrap();
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["registered"], false);
+        assert!(v["configDamaged"].as_str().unwrap_or("").contains("not valid JSON"), "{v}");
+
+        // Setup is refused with the true reason, not invited and then failed half way through.
+        let r = c.post(format!("{origin}/api/hub/bootstrap"))
+            .json(&serde_json::json!({"vid": "v-new", "name": "New", "token": "new-token"})).send().await.unwrap();
+        assert_eq!(r.status(), 409);
+        assert!(r.text().await.unwrap().contains("damaged"));
+
+        // And the original file — the token inside it — is untouched and still recoverable.
+        assert!(std::fs::read_to_string(hub_config::config_path_in(&base)).unwrap().contains("hubtok-sec"));
     }
 
     #[tokio::test]

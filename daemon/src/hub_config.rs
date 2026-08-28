@@ -172,16 +172,88 @@ pub fn mint_hub_id() -> String {
     format!("hub_{}", &hex[..24])
 }
 
+/// A UTF-8 BOM is not JSON, and serde_json is right to refuse it — but something has to strip it.
+///
+/// ⚠️ THIS COST A HUB IN THE FIELD. On 2026-08-28 CENTRAL's `hub.json` was rewritten with
+/// PowerShell 5.1's `Set-Content -Encoding UTF8`, which prepends `EF BB BF` and gives no hint that
+/// it did. The three bytes made the whole file unparseable, the daemon silently fell back to
+/// defaults, and a registered hub came up `registered:false, allowed:false` — deaf, disarmed, and
+/// giving no reason. Any Windows text editor or shell can do this; the hub has to survive it.
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
+/// What is actually on disk. The distinction MATTERS and used to be collapsed:
+///  * `Missing`  — a fresh machine that is not a hub. Defaults are correct.
+///  * `Parsed`   — the normal case.
+///  * `Damaged`  — a file EXISTS and could not be read. Defaults are NOT correct here: this
+///    machine IS a hub, and its identity, token and member keys are in that file.
+pub enum ConfigState {
+    Missing,
+    Parsed(Box<HubConfig>),
+    Damaged(String),
+}
+
+/// Read the file and say honestly which of the three it is. Everything else is built on this.
+pub fn read_config_state_in(base: &Path) -> ConfigState {
+    let path = config_path_in(base);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ConfigState::Missing,
+        Err(e) => return ConfigState::Damaged(format!("could not read {}: {e}", path.display())),
+    };
+    match serde_json::from_str::<HubConfig>(strip_bom(&text)) {
+        Ok(cfg) => ConfigState::Parsed(Box::new(cfg)),
+        Err(e) => ConfigState::Damaged(format!("{} is not valid JSON: {e}", path.display())),
+    }
+}
+
+/// The damage, if there is any — for `/api/hub/status`, so a wedged hub says so out loud instead
+/// of presenting as a factory-fresh one.
+pub fn config_damage_in(base: &Path) -> Option<String> {
+    match read_config_state_in(base) {
+        ConfigState::Damaged(why) => Some(why),
+        _ => None,
+    }
+}
+
+/// Last damage message we logged, so an unparseable file does not write a line on every request —
+/// `read_config_in` is called on essentially every endpoint. Logging on CHANGE means it is written
+/// once per boot per distinct fault, which is what someone reading the log actually wants.
+static LOGGED_DAMAGE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn log_damage_once(why: &str) {
+    let mut g = match LOGGED_DAMAGE.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if g.as_deref() == Some(why) {
+        return;
+    }
+    *g = Some(why.to_string());
+    crate::hlog!("config: DAMAGED - {why}");
+    crate::hlog!("config: running on DEFAULTS (unregistered, disarmed) and REFUSING to overwrite the file - fix or delete it");
+}
+
 pub fn read_config() -> HubConfig {
     read_config_in(&shared_base())
 }
 
 /// Same, under an explicit base — hub_server and its tests read the store without touching the
 /// real shared directory.
+///
+/// Damage still yields defaults, because ~25 call sites need a `HubConfig` and a boat hub that
+/// panics is worse than one that is merely unregistered. What has CHANGED is that damage is no
+/// longer silent (it is logged, and reported by `/api/hub/status`) and no longer destructive
+/// (`write_config_in` refuses to save these defaults over the real file).
 pub fn read_config_in(base: &Path) -> HubConfig {
-    match std::fs::read_to_string(config_path_in(base)) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => HubConfig::default(),
+    match read_config_state_in(base) {
+        ConfigState::Parsed(cfg) => *cfg,
+        ConfigState::Missing => HubConfig::default(),
+        ConfigState::Damaged(why) => {
+            log_damage_once(&why);
+            HubConfig::default()
+        }
     }
 }
 
@@ -192,6 +264,21 @@ pub fn write_config(cfg: &HubConfig) -> Result<(), String> {
 }
 
 pub fn write_config_in(base: &Path, cfg: &HubConfig) -> Result<(), String> {
+    // ⚠️ REFUSE TO SAVE OVER A FILE WE COULD NOT READ. This is the second half of the BOM failure
+    // and by far the worse half: `read_config_in` hands back DEFAULTS for a damaged file, so any
+    // writer — discovery saving a gateway, the key sync, `with_hub_id` minting an id — would
+    // persist those defaults and PERMANENTLY destroy the hub's token, vehicle and member keys over
+    // what may be a three-byte problem. Refusing keeps a recoverable fault recoverable.
+    //
+    // There is no lockout: the file is still deletable (`clear_in`, and `/api/hub/clear`), which is
+    // the deliberate way to start over. Damage is a human-fix situation, and a human can fix it
+    // only if the evidence is still there.
+    if let ConfigState::Damaged(why) = read_config_state_in(base) {
+        crate::hlog!("config: refused a write over a damaged file - {why}");
+        return Err(format!(
+            "refusing to overwrite a configuration that could not be read ({why}) - fix or remove the file first"
+        ));
+    }
     let path = config_path_in(base);
     let dir = path.parent().ok_or("no parent directory")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
@@ -307,5 +394,81 @@ mod tests {
         // before this field existed must not start accepting unauthenticated valve-closing
         // reports the moment it is upgraded.
         assert!(partial.shelly_secret.is_empty());
+    }
+
+    fn temp_base(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("brvg-hub-config-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(DIR_NAME)).unwrap();
+        d
+    }
+
+    fn seeded(base: &Path) -> HubConfig {
+        let cfg = HubConfig {
+            hub_id: "hub_real".into(), vid: "v_real".into(), name: "Central".into(),
+            enabled: true, heartbeat_secs: 60, token: "the-token-that-must-survive".into(),
+            ..HubConfig::default()
+        };
+        write_config_in(base, &cfg).unwrap();
+        cfg
+    }
+
+    #[test]
+    fn a_utf8_bom_does_not_make_the_config_unreadable() {
+        // PowerShell 5.1's `Set-Content -Encoding UTF8` writes one, and it disarmed a real hub.
+        let base = temp_base("bom");
+        let cfg = seeded(&base);
+        let text = std::fs::read_to_string(config_path_in(&base)).unwrap();
+        std::fs::write(config_path_in(&base), format!("\u{feff}{text}")).unwrap();
+        assert_eq!(read_config_in(&base), cfg, "three leading bytes must not cost the hub its identity");
+    }
+
+    #[test]
+    fn a_missing_file_is_defaults_but_an_unreadable_one_is_damage() {
+        let base = temp_base("states");
+        // Missing: a machine that is simply not a hub. Defaults are the right answer.
+        assert!(matches!(read_config_state_in(&base), ConfigState::Missing));
+        assert_eq!(config_damage_in(&base), None);
+
+        seeded(&base);
+        assert!(matches!(read_config_state_in(&base), ConfigState::Parsed(_)));
+
+        std::fs::write(config_path_in(&base), "{ this is not json").unwrap();
+        assert!(matches!(read_config_state_in(&base), ConfigState::Damaged(_)));
+        // ...and status must be able to SAY so, which is the difference between a hub that is
+        // wedged and a hub that looks factory-fresh.
+        assert!(config_damage_in(&base).unwrap().contains("not valid JSON"));
+    }
+
+    #[test]
+    fn a_damaged_config_is_never_overwritten() {
+        // THE POINT OF THIS WHOLE MECHANISM. Reads fall back to defaults, so without the guard the
+        // very next writer persists those defaults and the token is gone for good.
+        let base = temp_base("nooverwrite");
+        seeded(&base);
+        // Truncated mid-write, the shape a power cut or a bad editor actually leaves behind — and
+        // the surviving text still holds the identity we must not throw away.
+        std::fs::write(config_path_in(&base), "{\"hub_id\": \"hub_real\", \"token\": \"the-tok").unwrap();
+
+        let defaults = read_config_in(&base);
+        assert!(defaults.token.is_empty(), "a damaged read yields defaults - that is why the write guard exists");
+
+        let err = write_config_in(&base, &defaults).unwrap_err();
+        assert!(err.contains("refusing to overwrite"), "{err}");
+        // The evidence — and the token inside it — is still on disk for a human to recover.
+        assert_eq!(std::fs::read_to_string(config_path_in(&base)).unwrap().contains("hub_real"), true);
+    }
+
+    #[test]
+    fn deleting_is_still_the_way_out_of_damage() {
+        // No lockout: `clear_in` removes the file, so /api/hub/clear can always start over.
+        let base = temp_base("escape");
+        seeded(&base);
+        std::fs::write(config_path_in(&base), "not json at all").unwrap();
+        assert!(write_config_in(&base, &HubConfig::default()).is_err());
+        clear_in(&base).unwrap();
+        assert!(matches!(read_config_state_in(&base), ConfigState::Missing));
+        write_config_in(&base, &HubConfig { hub_id: "hub_fresh".into(), ..HubConfig::default() }).unwrap();
+        assert_eq!(read_config_in(&base).hub_id, "hub_fresh");
     }
 }
