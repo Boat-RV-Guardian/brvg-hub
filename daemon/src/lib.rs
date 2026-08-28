@@ -2,6 +2,7 @@
 // the other, for its `--hub` compatibility path. See Cargo.toml for why this is its own crate.
 
 pub mod hub_log;
+pub mod adopt;
 pub mod gateway_http;
 pub mod hub_config;
 pub mod cycle;
