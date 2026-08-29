@@ -172,6 +172,32 @@ pub fn mint_hub_id() -> String {
     format!("hub_{}", &hex[..24])
 }
 
+/// ⚠️⚠️ DO NOT EDIT `hub.json` BY HAND ON WINDOWS. It has cost this project twice, from ONE line:
+///
+/// ```text
+/// Get-Content -Raw $cfg | ConvertFrom-Json | ... | ConvertTo-Json | Set-Content $cfg -Encoding UTF8
+/// ```
+///
+/// PowerShell 5.1 gets BOTH halves wrong, in opposite directions:
+///   * `Get-Content -Raw` decodes a BOM-less UTF-8 file as **cp1252**, so the em-dash in a hub
+///     named `Hub — Central` (`E2 80 94`) comes back as the three characters `â€"`;
+///   * `Set-Content -Encoding UTF8` writes a **BOM**, and re-encodes those three characters as
+///     `C3 A2 E2 82 AC E2 80 9D`.
+///
+/// On 2026-08-28 that one command disarmed a registered hub (the BOM — see `strip_bom` below) and
+/// silently corrupted its name, which then went out on every heartbeat until 2026-08-29. The
+/// mangling is STABLE AT ONE LEVEL, so it looks like data rather than damage and survives review.
+///
+/// Neither failure is the daemon's: `cfg.name` is only ever assigned from a serde-parsed JSON body,
+/// and there is no cp1252 anywhere in this crate. **The fix is not to defend against it here.**
+/// Guessing which strings are mojibake and "repairing" them would corrupt a hub someone genuinely
+/// named `â€"`, and a config store that rewrites its own contents on a heuristic is worse than one
+/// that carries a bad name. Repair belongs at the display layer, or at the source.
+///
+/// TO CHANGE A HUB'S CONFIGURATION, USE ITS OWN API — `POST /api/hub/config` — so this process does
+/// the writing, in UTF-8, through serde. That is the path the app takes and the path that is
+/// tested. A shell round-trip through the file is not a supported way to configure a hub.
+///
 /// A UTF-8 BOM is not JSON, and serde_json is right to refuse it — but something has to strip it.
 ///
 /// ⚠️ THIS COST A HUB IN THE FIELD. On 2026-08-28 CENTRAL's `hub.json` was rewritten with
