@@ -146,6 +146,75 @@ mod tests {
         format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", rem / 3600, (rem % 3600) / 60, rem % 60)
     }
 
+    /// EVERY `hlog!` LINE MUST BE ASCII, and this test is the reason the em-dashes came out.
+    ///
+    /// The daemon writes UTF-8, which is correct. The problem is who reads it: PowerShell 5.1's
+    /// `Get-Content` — the tool actually reachable on a Windows boat PC — decodes a BOM-less file
+    /// as ANSI, so on 2026-08-28 a real log line came back as
+    /// `hub: management API on 0.0.0.0:8722 (unregistered ?" waiting for bootstrap)`. A log is read
+    /// by whatever the person on the boat has, not by whatever we wish they had, and a diagnostic
+    /// nobody can read is the failure this whole module exists to prevent.
+    ///
+    /// The fix is the log STRINGS, not the reader: comments and doc comments keep the house style,
+    /// because no shell ever decodes those.
+    #[test]
+    fn every_log_line_this_daemon_can_write_is_ascii() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders: Vec<String> = Vec::new();
+        let mut files = 0;
+        visit(&dir, &mut |path: &std::path::Path, text: &str| {
+            files += 1;
+            // The needle is assembled rather than written out, because THIS FILE IS ONE OF THE
+            // FILES BEING SCANNED — a literal would match itself, and the scan would then walk off
+            // into this test's own doc comment and report it as an offender. It did, first run.
+            let needle = concat!("hlog", "!(");
+            for (start, _) in text.match_indices(needle) {
+                let seg = &text[start..];
+                let end = matching_paren(seg).unwrap_or(seg.len());
+                let call = &seg[..end];
+                if !call.is_ascii() {
+                    let line = text[..start].matches('\n').count() + 1;
+                    offenders.push(format!("{}:{line}", path.display()));
+                }
+            }
+        });
+        assert!(files > 5, "the scan found almost no source files — it is not looking where it thinks");
+        assert!(
+            offenders.is_empty(),
+            "these hlog! calls contain non-ASCII and will render as mojibake in PowerShell: {offenders:?}"
+        );
+    }
+
+    fn matching_paren(s: &str) -> Option<usize> {
+        let b = s.as_bytes();
+        let open = s.find('(')?;
+        let (mut depth, mut i, mut in_str, mut esc) = (0i32, open, false, false);
+        while i < b.len() {
+            let c = b[i] as char;
+            if in_str {
+                if esc { esc = false } else if c == '\\' { esc = true } else if c == '"' { in_str = false }
+            } else if c == '"' { in_str = true }
+            else if c == '(' { depth += 1 }
+            else if c == ')' { depth -= 1; if depth == 0 { return Some(i + 1) } }
+            i += 1;
+        }
+        None
+    }
+
+    fn visit(dir: &std::path::Path, f: &mut impl FnMut(&std::path::Path, &str)) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                visit(&p, f);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                if let Ok(text) = std::fs::read_to_string(&p) {
+                    f(&p, &text);
+                }
+            }
+        }
+    }
+
     #[test]
     fn tail_and_write_are_inert_before_init() {
         // Early calls must not panic and must not create files anywhere — the daemon logs before it

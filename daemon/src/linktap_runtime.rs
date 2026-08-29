@@ -153,7 +153,7 @@ impl Runtime {
         reports.push(Report { device: format!("lt_{id}"), event: "linktap.measurement".into(), params });
 
         if first_time_not_metering {
-            crate::hlog!("linktap: {id} does not meter flow — cycles are bounded by TIME only");
+            crate::hlog!("linktap: {id} does not meter flow - cycles are bounded by TIME only");
         }
         (r.action, reports)
     }
