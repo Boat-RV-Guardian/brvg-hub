@@ -201,12 +201,42 @@ pub fn parse_gateway_push(body: &str) -> Vec<(String, serde_json::Value)> {
 /// The worker's flood-shutoff classification, ported VERBATIM from cloud-server events.ts so the
 /// hub closes the valve on exactly the events the cloud would have: flood/leak/alarm, minus
 /// clears, minus telemetry.
+/// Words that describe the SENSOR'S OWN CONDITION, not water.
+///
+/// 🔴 WHY THIS LIST EXISTS (owner, 2026-08-31): *"why can't the hub parse that its a cable unplugged
+/// notice, vs flood?"* It could not, and the reason was embarrassing — the rule below was a
+/// substring match, so `flood.cable_unplugged` counted as a flood purely because the string contains
+/// "flood". A probe cable coming loose would have slammed the vehicle's water shut.
+///
+/// The workaround that had been applied was to point `flood.cable_unplugged` at the CLOUD ONLY, so
+/// it could not reach the hub. The owner rejected that too, and was right: *"if its cloud only and
+/// the firewall blocks access outside through the proxy, it would block that function"*. A fault
+/// notice that only travels over the WAN is useless in exactly the situation this hub exists for —
+/// it made the safety path robust and left the fault path depending on the thing that fails. The
+/// answer is to CLASSIFY correctly and let every event reach the hub, not to withhold events from
+/// it.
+const SENSOR_FAULT_WORDS: &[&str] = &[
+    "unplugged", "disconnected", "cable", "fault", "error",
+    "low_battery", "battery_low", "mute", "unmute", "offline",
+];
+
+/// Is this event WATER, and therefore a reason to shut the valve?
+///
+/// Deliberately conservative in BOTH directions, because the two mistakes are not symmetric:
+/// failing to close on a real flood is the product not working, and closing on a sensor fault is the
+/// product turning off a boat's water for no reason. Neither is acceptable, so the classification is
+/// explicit rather than a substring guess.
 pub fn is_flood_shutoff(event: &str) -> bool {
     let e = event.to_ascii_lowercase();
     if e.ends_with(".measurement") || e.ends_with(".change") {
         return false;
     }
     if e.ends_with("_off") || e.ends_with(".off") {
+        return false;
+    }
+    // A fault is a fault even when its name starts with "flood." — the component reporting it is the
+    // flood sensor, which is why the prefix is there and why the substring match was fooled.
+    if SENSOR_FAULT_WORDS.iter().any(|w| e.contains(w)) {
         return false;
     }
     e.contains("flood") || e.contains("leak") || e.contains("alarm")
@@ -428,6 +458,17 @@ mod tests {
         }
         for e in ["flood.alarm_off", "alarm.off", "flood.measurement", "flood.change", "voltmeter.measurement", "button.push"] {
             assert!(!is_flood_shutoff(e), "{e} must NOT close the valve");
+        }
+        // 🔴 SENSOR FAULTS ARE NOT FLOODS, however their component names them. `flood.cable_unplugged`
+        // is the real Shelly Flood G4 event for a probe cable coming loose, and the old substring
+        // rule closed the valve on it because the string contains "flood" — a loose cable would have
+        // shut a vehicle's water off. Owner, 2026-08-31: "why can't the hub parse that its a cable
+        // unplugged notice, vs flood?"
+        for e in [
+            "flood.cable_unplugged", "flood.cable_disconnected", "flood.fault", "flood.error",
+            "flood.low_battery", "flood.mute", "flood.unmute", "leak.sensor_offline",
+        ] {
+            assert!(!is_flood_shutoff(e), "{e} is a sensor fault and must NOT close the valve");
         }
         // The real Shelly names that arrive on /api/hub/shelly and MUST close the valve. These are
         // the whole reason the hub has a local ingest at all — with the internet down this
