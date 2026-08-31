@@ -15,6 +15,13 @@ on:
   pull_request:
     paths: ['custom_components/**', 'tests/**', '.github/workflows/home-assistant.yml', 'hacs.json', 'pytest.ini', 'requirements_test.txt']
 
+# HYG-1, 2026-08-30 security review. Without this the workflow token inherits the repository's
+# DEFAULT scope, which on an older repo is read/write to everything — and none of the steps below
+# writes anything. brvg-hub is PUBLIC, so its two workflows are the ones where an over-scoped token
+# is worth the least to keep. Raise this deliberately if a step ever needs to push, tag or release.
+permissions:
+  contents: read
+
 jobs:
   hassfest:
     runs-on: ubuntu-latest
