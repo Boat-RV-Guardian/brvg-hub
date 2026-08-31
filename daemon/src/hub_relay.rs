@@ -181,47 +181,95 @@ pub async fn run(rt: Shared) {
     }
 }
 
+/// How often to ping the worker, and how long silence may last before we call the socket dead.
+///
+/// 🔴 A HALF-OPEN RELAY SOCKET COST A REAL VEHICLE ITS REMOTE CONTROL, 2026-08-31. The hub logged
+/// `relay connected` and then sat in `socket.next().await` for five hours while the worker's side
+/// had no socket at all — every relayed call answered 503 "no hub is connected". The hub had no way
+/// to notice: it ANSWERED pings and never SENT one, so nothing ever asked the connection a question
+/// it could fail to answer. A TCP connection that nobody writes to can stay "open" indefinitely.
+///
+/// Three missed pings before giving up: one lost frame on a marina's Wi-Fi is not a dead socket, and
+/// reconnecting on every hiccup would be its own outage.
+const PING_EVERY: Duration = Duration::from_secs(30);
+const SILENCE_LIMIT: Duration = Duration::from_secs(95);
+
+/// PURE: has the peer gone silent long enough to call the socket dead?
+///
+/// Split out because the rule lives inside a `select!` arm, which no test can reach — and a
+/// liveness check nothing verifies is how the original "answer pings, never send one" survived.
+pub fn relay_is_silent(silent_for: Duration, limit: Duration) -> bool {
+    silent_for > limit
+}
+
 /// One connection's lifetime. `Ok` means a clean close; `Err` carries a reason worth backing off for.
 async fn serve_once(rt: &Shared, cfg: &HubConfig) -> Result<(), String> {
     let url = relay_socket_url(&rt.worker_base, cfg)?;
-    let (mut socket, _resp) = tokio_tungstenite::connect_async(&url)
+    let (socket, _resp) = tokio_tungstenite::connect_async(&url)
         .await
         .map_err(|e| e.to_string())?;
     crate::hlog!("hub: relay connected");
-    socket
+    // Split so the ping timer can write while the read half is parked on `next()`. Without this the
+    // two borrows collide and the whole liveness check is impossible to express.
+    let (mut write, mut read) = socket.split();
+    write
         .send(Message::Text(hello_frame(cfg)))
         .await
         .map_err(|e| e.to_string())?;
 
-    while let Some(frame) = socket.next().await {
-        let frame = frame.map_err(|e| e.to_string())?;
-        let text = match frame {
-            Message::Text(t) => t,
-            Message::Ping(p) => {
-                socket.send(Message::Pong(p)).await.map_err(|e| e.to_string())?;
-                continue;
+    let mut ping = tokio::time::interval(PING_EVERY);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping.tick().await; // the first tick fires immediately; we want a full interval of grace
+    let mut last_seen = tokio::time::Instant::now();
+
+    loop {
+        tokio::select! {
+            frame = read.next() => {
+                let Some(frame) = frame else { return Ok(()) }; // the stream ended cleanly
+                let frame = frame.map_err(|e| e.to_string())?;
+                // ANY frame is proof of life, a Pong included — that is the point of sending pings.
+                last_seen = tokio::time::Instant::now();
+                let text = match frame {
+                    Message::Text(t) => t,
+                    Message::Ping(p) => {
+                        write.send(Message::Pong(p)).await.map_err(|e| e.to_string())?;
+                        continue;
+                    }
+                    Message::Close(_) => return Ok(()),
+                    // Binary/Pong/raw frames are not part of this protocol, but they still count as
+                    // liveness above before being dropped here.
+                    _ => continue,
+                };
+                let Some(msg) = parse_worker_message(&text) else { continue };
+                match msg {
+                    WorkerMessage::Keys(keys) => {
+                        crate::hlog!("hub: member keys pushed ({})", keys.len());
+                        apply_keys(rt, keys).await;
+                    }
+                    WorkerMessage::Call { id, uid, role, method, path, body } => {
+                        let caller = Caller { uid, role };
+                        let answer = dispatch(rt, &caller, &method, &path, body.as_bytes()).await;
+                        write
+                            .send(Message::Text(result_frame(&id, &answer)))
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
             }
-            Message::Close(_) => return Ok(()),
-            // Binary/Pong/raw frames are not part of this protocol.
-            _ => continue,
-        };
-        let Some(msg) = parse_worker_message(&text) else { continue };
-        match msg {
-            WorkerMessage::Keys(keys) => {
-                crate::hlog!("hub: member keys pushed ({})", keys.len());
-                apply_keys(rt, keys).await;
-            }
-            WorkerMessage::Call { id, uid, role, method, path, body } => {
-                let caller = Caller { uid, role };
-                let answer = dispatch(rt, &caller, &method, &path, body.as_bytes()).await;
-                socket
-                    .send(Message::Text(result_frame(&id, &answer)))
-                    .await
-                    .map_err(|e| e.to_string())?;
+            _ = ping.tick() => {
+                // ⚠️ CHECK BEFORE SENDING. If the peer has gone silent, another ping into the void
+                // proves nothing; returning Err drops us into the reconnect backoff, which is the
+                // only thing that actually restores remote control.
+                if last_seen.elapsed() > SILENCE_LIMIT {
+                    return Err(format!(
+                        "relay went silent for {}s - treating the socket as dead and reconnecting",
+                        last_seen.elapsed().as_secs()
+                    ));
+                }
+                write.send(Message::Ping(Vec::new())).await.map_err(|e| e.to_string())?;
             }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -401,5 +449,26 @@ mod tests {
         assert_eq!(v["body"], r#"{"error":"nope"}"#);
         // The worker refuses a non-numeric status, so this must never be stringified.
         assert!(v["status"].is_number());
+    }
+
+    #[test]
+    fn a_silent_relay_is_treated_as_dead_but_a_hiccup_is_not() {
+        // 🔴 The hub answered pings and never sent one, so `socket.next()` parked forever on a
+        // half-open connection — five hours of "relay connected" while the worker had no socket at
+        // all and every remote call answered 503.
+        assert!(!relay_is_silent(Duration::from_secs(0), SILENCE_LIMIT));
+        assert!(!relay_is_silent(SILENCE_LIMIT, SILENCE_LIMIT), "exactly at the limit is still alive");
+        assert!(relay_is_silent(SILENCE_LIMIT + Duration::from_secs(1), SILENCE_LIMIT));
+    }
+
+    #[test]
+    fn the_silence_limit_leaves_room_for_more_than_one_lost_ping() {
+        // ⚠️ THE CONSTANTS ARE A PAIR. A limit shorter than the ping interval would declare the
+        // socket dead before the first ping could possibly be answered, turning the fix into a
+        // reconnect loop — an outage of its own. Three intervals of grace means one lost frame on a
+        // marina's Wi-Fi is not mistaken for a dead peer.
+        assert!(SILENCE_LIMIT > PING_EVERY, "the limit must outlast a single ping interval");
+        assert!(SILENCE_LIMIT >= PING_EVERY * 3, "at least three pings before giving up");
+        assert!(SILENCE_LIMIT < PING_EVERY * 6, "but not so long that remote control stays dead for minutes");
     }
 }
