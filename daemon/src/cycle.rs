@@ -33,6 +33,17 @@ impl Mode {
             Mode::Tankfill => "tankfill",
         }
     }
+
+    /// Parse the wire spelling the app and the hub API use. Unknown text is NORMAL, matching
+    /// `do_valve`'s own default — a mode nobody recognises must take the CAPPED path, never the
+    /// time-only one, because guessing "washdown" would drop the volume cap off a real run.
+    pub fn from_wire(s: &str) -> Mode {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "washdown" => Mode::Washdown,
+            "tankfill" => Mode::Tankfill,
+            _ => Mode::Normal,
+        }
+    }
 }
 
 /// Why a cycle ended. `VolumeCap` and `Timer` drive the restart decision; `FloodShutoff` exists so
