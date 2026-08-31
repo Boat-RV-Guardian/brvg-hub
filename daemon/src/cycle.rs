@@ -95,6 +95,9 @@ pub struct Running {
     pub provenance: Provenance,
     /// Set once the hub has issued a stop it has not yet seen confirmed, so we do not double-stop.
     pub stop_issued: Option<EndReason>,
+    /// The app's "Start 'Normal Run' when timer expires" checkbox, carried BY THE RUN so the hub
+    /// can honour it without the app being open. Only meaningful for a washdown.
+    pub resume_normal: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +113,8 @@ pub struct Ended {
     pub reason: EndReason,
     pub volume_l: f64,
     pub provenance: Provenance,
+    /// Carried from the Running state so `should_resume_normal` needs nothing but the end.
+    pub resume_normal: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -141,7 +146,7 @@ pub struct StepResult {
 
 /// The hub started a cycle itself. Returns Err on the two combinations the owner has outlawed,
 /// rather than silently "fixing" them — that is how the external-cap bug shipped last time.
-pub fn start_hub_cycle(at: i64, mode: Mode, duration_secs: u64, volume_cap_l: f64) -> Result<State, String> {
+pub fn start_hub_cycle(at: i64, mode: Mode, duration_secs: u64, volume_cap_l: f64, resume_normal: bool) -> Result<State, String> {
     if mode == Mode::Washdown && volume_cap_l > 0.0 {
         return Err("washdown is time-limited only — a volume cap on washdown is the outlawed shape".into());
     }
@@ -156,6 +161,9 @@ pub fn start_hub_cycle(at: i64, mode: Mode, duration_secs: u64, volume_cap_l: f6
         volume_l: 0.0,
         provenance: Provenance::Hub,
         stop_issued: None,
+        // Only a washdown can carry it: resuming Normal Run after a Normal Run is auto-restart,
+        // which is a separate decision with its own profile switch.
+        resume_normal: resume_normal && mode == Mode::Washdown,
     }))
 }
 
@@ -170,6 +178,8 @@ pub fn adopt_cycle(at: i64, profile: &Profile, remain_secs: Option<u64>) -> Runn
         volume_l: 0.0,
         provenance: Provenance::Adopted,
         stop_issued: None,
+        // An adopted run carries no intent of ours — we did not issue it.
+        resume_normal: false,
     }
 }
 
@@ -262,10 +272,29 @@ pub fn step(state: &State, obs: Observation, profile: &Profile) -> StepResult {
                 reason,
                 volume_l: next.volume_l,
                 provenance: cur.provenance,
+                resume_normal: cur.resume_normal,
             };
             StepResult { state: State::Idle, action: Action::None, ended: Some(ended) }
         }
     }
+}
+
+/// Should this end be followed by a NORMAL RUN, because the washdown that just finished was told
+/// to resume one?
+///
+/// 🔴 THE PROMISE THE APP'S CHECKBOX ALREADY MAKES. "Start 'Normal Run' when timer expires" was
+/// implemented entirely in the app: a React ref holding a wall-clock deadline, persisted NOWHERE,
+/// polled only while the widget was mounted and foregrounded. Close the app, lock the phone, or let
+/// the tab background, and the resume was gone — with no record of it on the hub, in the cloud, or
+/// anywhere else. It could not be recovered because nothing knew it was owed.
+///
+/// The app also padded the HARDWARE duration by +5 minutes so the valve would not shut between the
+/// window ending and the app noticing, which is why a 5-minute washdown ran for 10.
+///
+/// TIMER ONLY, exactly like `should_auto_restart`: a washdown cut short by a flood, a manual stop or
+/// an unexplained close must never reopen the valve. "When unsure, spend no water."
+pub fn should_resume_normal(ended: &Ended) -> bool {
+    ended.resume_normal && ended.mode == Mode::Washdown && ended.reason == EndReason::Timer
 }
 
 /// ONLY a timer expiry of a NORMAL run restarts. Volume-capped, manual, flood-stopped or
@@ -372,7 +401,7 @@ mod tests {
         // End to end through `step`: a cycle capped at 37.85 L flowing at 22.07 L/min must issue
         // its stop BEFORE the cap, at ~34.9 L. Firing at 37.85 is the bug this exists to prevent.
         let profile = Profile { duration_secs: 3600, volume_cap_l: 37.85, auto_restart: false };
-        let started = start_hub_cycle(0, Mode::Normal, 3600, 37.85).unwrap();
+        let started = start_hub_cycle(0, Mode::Normal, 3600, 37.85, false).unwrap();
         let o = Observation { at: 60_000, watering: true, volume_l: 35.0, remain_secs: Some(3540), speed_lpm: 22.07 };
         let r = step(&started, o, &profile);
         assert!(
@@ -381,7 +410,7 @@ mod tests {
         );
         // ...and the same volume with NO flow reading must NOT stop early.
         let o2 = Observation { at: 60_000, watering: true, volume_l: 35.0, remain_secs: Some(3540), speed_lpm: 0.0 };
-        let r2 = step(&start_hub_cycle(0, Mode::Normal, 3600, 37.85).unwrap(), o2, &profile);
+        let r2 = step(&start_hub_cycle(0, Mode::Normal, 3600, 37.85, false).unwrap(), o2, &profile);
         assert!(matches!(r2.action, Action::None), "no speed => no lead => no early stop");
     }
 
@@ -391,16 +420,16 @@ mod tests {
 
     #[test]
     fn the_three_modes_are_enforced_at_the_door() {
-        assert!(start_hub_cycle(T0, Mode::Normal, 3600, 0.0).is_err());
-        assert!(start_hub_cycle(T0, Mode::Tankfill, 3600, 0.0).is_err());
+        assert!(start_hub_cycle(T0, Mode::Normal, 3600, 0.0, false).is_err());
+        assert!(start_hub_cycle(T0, Mode::Tankfill, 3600, 0.0, false).is_err());
         // The outlawed shape that cut 2-hour hose runs at ~26 gal.
-        assert!(start_hub_cycle(T0, Mode::Washdown, 7200, 100.0).is_err());
-        assert!(start_hub_cycle(T0, Mode::Washdown, 7200, 0.0).is_ok());
+        assert!(start_hub_cycle(T0, Mode::Washdown, 7200, 100.0, false).is_err());
+        assert!(start_hub_cycle(T0, Mode::Washdown, 7200, 0.0, false).is_ok());
     }
 
     #[test]
     fn issues_a_stop_the_moment_the_cap_is_reached_and_never_twice() {
-        let s = start_hub_cycle(T0, Mode::Normal, 24 * 3600, 100.0).unwrap();
+        let s = start_hub_cycle(T0, Mode::Normal, 24 * 3600, 100.0, false).unwrap();
         let r = step(&s, obs(T0 + 60_000, true, 100.2), &profile());
         assert_eq!(r.action, Action::Stop(EndReason::VolumeCap));
         let r2 = step(&r.state, obs(T0 + 75_000, true, 101.0), &profile());
@@ -409,7 +438,7 @@ mod tests {
 
     #[test]
     fn washdown_never_volume_stops_whatever_the_meter_says() {
-        let s = start_hub_cycle(T0, Mode::Washdown, 7200, 0.0).unwrap();
+        let s = start_hub_cycle(T0, Mode::Washdown, 7200, 0.0, false).unwrap();
         let r = step(&s, obs(T0 + 60_000, true, 5000.0), &profile());
         assert_eq!(r.action, Action::None);
     }
@@ -418,7 +447,7 @@ mod tests {
     fn the_bug_this_module_exists_for_a_hardware_cap_stop_inside_one_poll() {
         // The old heuristic read any close near the end of a poll gap as "natural expiry" and
         // restarted — spending more water after a cap had already fired.
-        let s = start_hub_cycle(T0, Mode::Normal, 600, 100.0).unwrap();
+        let s = start_hub_cycle(T0, Mode::Normal, 600, 100.0, false).unwrap();
         let closed = step(&s, obs(T0 + 120_000, false, 100.3), &profile());
         let ended = closed.ended.unwrap();
         assert_eq!(ended.reason, EndReason::VolumeCap);
@@ -427,11 +456,11 @@ mod tests {
 
     #[test]
     fn classifies_timer_manual_flood_and_unknown() {
-        let s = start_hub_cycle(T0, Mode::Normal, 600, 100.0).unwrap();
+        let s = start_hub_cycle(T0, Mode::Normal, 600, 100.0, false).unwrap();
         let timer = step(&s, obs(T0 + 590_000, false, 40.0), &profile()).ended.unwrap();
         assert_eq!(timer.reason, EndReason::Timer);
 
-        let mut r = match start_hub_cycle(T0, Mode::Normal, 600, 100.0).unwrap() {
+        let mut r = match start_hub_cycle(T0, Mode::Normal, 600, 100.0, false).unwrap() {
             State::Running(x) => x,
             _ => unreachable!(),
         };
@@ -443,14 +472,48 @@ mod tests {
         let flood = step(&State::Running(r), obs(T0 + 60_000, false, 5.0), &profile()).ended.unwrap();
         assert_eq!(flood.reason, EndReason::FloodShutoff);
 
-        let s2 = start_hub_cycle(T0, Mode::Normal, 600, 100.0).unwrap();
+        let s2 = start_hub_cycle(T0, Mode::Normal, 600, 100.0, false).unwrap();
         let mystery = step(&s2, obs(T0 + 60_000, false, 5.0), &profile()).ended.unwrap();
         assert_eq!(mystery.reason, EndReason::Unknown);
     }
 
     #[test]
+    fn a_washdown_told_to_resume_reopens_only_on_its_timer() {
+        // 🔴 THE PROMISE THE APP'S CHECKBOX MAKES. "Start 'Normal Run' when timer expires" ran
+        // entirely in the app: an unpersisted React ref, polled only while the widget was mounted.
+        // Close the app or lock the phone and the resume vanished with no record anywhere.
+        let run = |mode, resume| match start_hub_cycle(T0, mode, 300, if mode == Mode::Washdown { 0.0 } else { 38.0 }, resume) {
+            Ok(State::Running(r)) => r,
+            _ => panic!("a valid cycle"),
+        };
+        let end = |r: &Running, reason| Ended {
+            mode: r.mode, ended_at: T0 + 300_000, reason, volume_l: 5.0,
+            provenance: r.provenance, resume_normal: r.resume_normal,
+        };
+
+        let wd = run(Mode::Washdown, true);
+        assert!(should_resume_normal(&end(&wd, EndReason::Timer)), "the washdown ran its course — resume");
+
+        // EVERY other ending must leave the valve shut. A washdown cut short by a flood that then
+        // reopened the water would be the worst bug this system could have.
+        for r in [EndReason::FloodShutoff, EndReason::Manual, EndReason::VolumeCap, EndReason::Unknown] {
+            assert!(!should_resume_normal(&end(&wd, r)), "{r:?} must NOT reopen the valve");
+        }
+
+        // Not asked for, so not done.
+        let plain = run(Mode::Washdown, false);
+        assert!(!should_resume_normal(&end(&plain, EndReason::Timer)));
+
+        // A NORMAL run cannot carry the intent — resuming Normal after Normal is auto-restart,
+        // a separate decision with its own profile switch.
+        let normal = run(Mode::Normal, true);
+        assert!(!normal.resume_normal, "the flag is washdown-only at construction");
+        assert!(!should_resume_normal(&end(&normal, EndReason::Timer)));
+    }
+
+    #[test]
     fn only_a_timer_expiry_of_a_normal_run_restarts() {
-        let mk = |reason, mode| Ended { mode, ended_at: T0, reason, volume_l: 10.0, provenance: Provenance::Hub };
+        let mk = |reason, mode| Ended { mode, ended_at: T0, reason, volume_l: 10.0, provenance: Provenance::Hub, resume_normal: false };
         assert!(should_auto_restart(&mk(EndReason::Timer, Mode::Normal), true));
         for r in [EndReason::VolumeCap, EndReason::Manual, EndReason::FloodShutoff, EndReason::Unknown] {
             assert!(!should_auto_restart(&mk(r, Mode::Normal), true), "{r:?} must not restart");
@@ -483,7 +546,7 @@ mod tests {
     #[test]
     fn the_ledger_counts_normal_and_tankfill_and_adopted_but_never_washdown() {
         let at = T0 + 3 * 3600 * 1000;
-        let mk = |mode, vol, prov| Ended { mode, ended_at: at, reason: EndReason::Timer, volume_l: vol, provenance: prov };
+        let mk = |mode, vol, prov| Ended { mode, ended_at: at, reason: EndReason::Timer, volume_l: vol, provenance: prov, resume_normal: false };
         let l = apply_to_ledger(None, &mk(Mode::Normal, 40.0, Provenance::Hub));
         let l = apply_to_ledger(Some(&l), &mk(Mode::Tankfill, 60.0, Provenance::Hub));
         let l = apply_to_ledger(Some(&l), &mk(Mode::Washdown, 500.0, Provenance::Hub));
@@ -495,7 +558,7 @@ mod tests {
     fn the_ledger_rolls_to_a_new_utc_day() {
         let late = 1_787_183_940_000; // 2026-08-19T23:59:00Z
         let early = 1_787_184_300_000; // 2026-08-20T00:05:00Z
-        let mk = |at| Ended { mode: Mode::Normal, ended_at: at, reason: EndReason::Timer, volume_l: 30.0, provenance: Provenance::Hub };
+        let mk = |at| Ended { mode: Mode::Normal, ended_at: at, reason: EndReason::Timer, volume_l: 30.0, provenance: Provenance::Hub, resume_normal: false };
         let l = apply_to_ledger(None, &mk(late));
         assert_eq!(l.day, "2026-08-19");
         let l2 = apply_to_ledger(Some(&l), &mk(early));

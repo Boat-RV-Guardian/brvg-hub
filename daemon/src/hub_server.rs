@@ -1273,6 +1273,45 @@ async fn linktap_act(
             }).await;
         }
     }
+
+    // 🔴 THE REOPEN. This function's doc comment has always said "restart on a timer expiry" and
+    // its body never did: `should_restart` had NO production caller, so the hub has never reopened
+    // a valve for any reason. The washdown resume had the same shape one layer up — it lived in an
+    // app-side React ref that was persisted nowhere and died with the page.
+    let pending = {
+        let mut guard = rt.linktap.lock().await;
+        match guard.as_mut() {
+            Some(r) => r.take_pending_open(dev_id),
+            None => None,
+        }
+    };
+    if let Some(open) = pending {
+        // The cap must be expressed in the GATEWAY's unit, exactly as do_valve does — reading it
+        // rather than assuming, because guessing litres under-reports a cap by 3.79x.
+        let cap_gw = if open.volume_cap_l > 0.0 {
+            Some(linktap::read_vol_unit(client, &gw).await.from_litres(open.volume_cap_l))
+        } else {
+            None
+        };
+        let body = linktap::build_start(&gw, dev_id, open.duration_secs, cap_gw);
+        let reply = linktap::post_command(client, &gw, &body).await;
+        if reply.ok {
+            crate::hlog!("linktap: {dev_id} - {} -> reopened for {}s", open.why, open.duration_secs);
+            // Record it as OURS, or the next poll would meet an already-running valve and adopt it —
+            // the bug fixed in 0.3.19, which a reopen path that skipped this would reintroduce.
+            let mut guard = rt.linktap.lock().await;
+            if let Some(r) = guard.as_mut() {
+                let _ = r.note_hub_open(dev_id, now_ms(), crate::cycle::Mode::Normal, open.duration_secs, open.volume_cap_l, false);
+            }
+        } else {
+            crate::hlog!("linktap: {dev_id} - {} FAILED: {:?}", open.why, reply.error);
+            spool_report(rt, &crate::linktap_runtime::Report {
+                device: format!("lt_{dev_id}"),
+                event: "linktap.reopen_failed".into(),
+                params: vec![("why".into(), open.why.into()), ("error".into(), reply.error.unwrap_or_default())],
+            }).await;
+        }
+    }
 }
 
 /// The poll floor — and, since this loop is the only thing on the boat that ever talks to the
@@ -1619,6 +1658,9 @@ struct ValveReq {
     volume_cap_l: Option<f64>,
     /// "normal" | "washdown" | "tankfill". Absent is treated as normal.
     mode: Option<String>,
+    /// The app's "Start 'Normal Run' when timer expires" checkbox, for a WASHDOWN. Carried on the
+    /// run so the hub honours it whether or not any app is open — see cycle::should_resume_normal.
+    resume_normal: Option<bool>,
 }
 
 async fn do_valve(rt: &Rt, caller: &Caller, body: &[u8]) -> Answer {
@@ -1714,7 +1756,8 @@ async fn do_valve(rt: &Rt, caller: &Caller, body: &[u8]) -> Answer {
                     cycle::Mode::Washdown => 0.0,
                     _ => req.volume_cap_l.unwrap_or_else(|| runtime.profile_for(&dev_id).volume_cap_l),
                 };
-                if let Err(e) = runtime.note_hub_open(&dev_id, now_ms(), mode, secs, cap_l) {
+                let resume = req.resume_normal.unwrap_or(false);
+                if let Err(e) = runtime.note_hub_open(&dev_id, now_ms(), mode, secs, cap_l, resume) {
                     // Never fail the caller for this: the valve IS open, which is what they asked
                     // for. Say it out loud, because a silent miss here reads as "started externally"
                     // in the app and nowhere else.
