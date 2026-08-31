@@ -150,6 +150,45 @@ impl Runtime {
             params.push(("day".into(), l.day.clone()));
             params.push(("day_vol_l".into(), format!("{:.2}", l.volume_l)));
         }
+
+        // 🔴 THE RUN'S TARGETS, because the hub is the only thing that knows them and it was
+        // telling nobody. Owner, 2026-08-31, looking at a run the hub had itself programmed:
+        // *"why does it say this? it should know these from the hub..."* — the app showed
+        // "Active Run Progress (Started Externally) / Time Remaining Unknown / Infinite".
+        //
+        // It said that because the app reads its targets from its OWN localStorage
+        // (`lt_target_dur_<deviceId>`), written only when THAT app instance issued the open. So a
+        // run started from anywhere else — the hub's API, an automation, a phone across the boat,
+        // or the same app after its storage was cleared — renders as an unbounded mystery. Under
+        // the hub-required architecture ("the hub is a SERVER, apps are clients") a client holding
+        // the authoritative copy of a run's targets is exactly backwards.
+        //
+        // The hub has had all of it in `cycle::Running` the whole time. Reported here rather than
+        // on a new endpoint so it reaches EVERY app the same way `flow_lpm` does: through the
+        // cloud, off-LAN included, with no new door to open.
+        //
+        // WHILE RUNNING ONLY. An idle valve has no targets, and emitting stale ones would leave the
+        // app drawing a finished run's numbers forever — the same trap the flow-rate comment below
+        // describes, in the opposite direction.
+        if let cycle::State::Running(run) = &track.state {
+            params.push(("mode".into(), run.mode.as_str().into()));
+            params.push(("dur_s".into(), run.duration_secs.to_string()));
+            // 0 = uncapped, which is the truth for a washdown rather than a missing value.
+            params.push(("cap_l".into(), format!("{:.2}", run.volume_cap_l)));
+            if let Some(r) = remain {
+                params.push(("remain_s".into(), r.to_string()));
+            }
+            // ⚠️ WHO STARTED IT. `Adopted` means the valve was already running when the hub first
+            // saw it — a button press on the tap, or a schedule inside the gateway. `Hub` means we
+            // programmed it and therefore vouch for the targets above. Without this the app cannot
+            // tell "started externally, targets unknown" from "started by the hub, targets known",
+            // and it currently guesses the first whenever its own localStorage is empty.
+            params.push(("prov".into(), match run.provenance {
+                cycle::Provenance::Hub => "hub".into(),
+                cycle::Provenance::Adopted => "adopted".to_string(),
+            }));
+        }
+
         reports.push(Report { device: format!("lt_{id}"), event: "linktap.measurement".into(), params });
 
         if first_time_not_metering {
@@ -589,5 +628,42 @@ mod tests {
         assert_eq!(b[0].0, DEV, "long ids normalise to the canonical 16");
         assert!(parse_gateway_push("not json").is_empty());
         assert!(parse_gateway_push("{}").is_empty());
+    }
+
+    #[test]
+    fn a_running_cycle_reports_its_targets_and_who_started_it() {
+        // 🔴 OWNER, 2026-08-31, on a run the hub had itself programmed: "why does it say this? it
+        // should know these from the hub..." — the app showed "(Started Externally) / Unknown /
+        // Infinite". It did, because the hub had every one of these in cycle::Running and published
+        // none of them; the app was left reading its own localStorage.
+        let mut r = rt(VolUnit::Litre);
+        let (_, reports) = r.observe(DEV, &json!({"is_watering":1,"vol":3.2,"remain_duration":212,"speed":5.5}), T0);
+        let m = reports.iter().find(|x| x.event == "linktap.measurement").expect("a measurement");
+        let p = |k: &str| m.params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        // This scenario is a valve ALREADY WATERING the first time the hub looks — a press on the
+        // tap, or a schedule inside the gateway — so the cycle is ADOPTED and its duration comes
+        // from the hardware rather than from our profile. Asserting the profile's 24h here was my
+        // first guess and it was wrong; the code was right.
+        assert_eq!(p("prov"), Some("adopted".into()), "already-running means adopted");
+        assert_eq!(p("remain_s"), Some("212".into()));
+        assert_eq!(p("dur_s"), Some("212".into()), "an adopted run is bounded by what the gateway says");
+        assert_eq!(p("cap_l"), Some("100.00".into()), "the cap is ours, from the profile");
+        assert!(p("mode").is_some(), "the app needs to tell a washdown from a normal run");
+        // ⚠️ AND THIS IS THE DISTINCTION THE OWNER ACTUALLY ASKED FOR. `adopted` is the ONLY case
+        // that deserves the app's "Started Externally" label. Today the app shows it whenever its
+        // own localStorage is empty, which is why a run the hub itself programmed was described as
+        // external.
+    }
+
+    #[test]
+    fn an_idle_valve_reports_no_targets_at_all() {
+        // Emitting a finished run's numbers would leave the app drawing them forever — the same
+        // trap the flow rate avoids by being reported only while watering.
+        let mut r = rt(VolUnit::Litre);
+        let (_, reports) = r.observe(DEV, &json!({"is_watering":0,"vol":0.0}), T0);
+        let m = reports.iter().find(|x| x.event == "linktap.measurement").expect("a measurement");
+        for k in ["dur_s", "cap_l", "remain_s", "prov", "mode"] {
+            assert!(m.params.iter().all(|(a, _)| a != k), "{k} must not be reported for an idle valve");
+        }
     }
 }
