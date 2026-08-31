@@ -1001,17 +1001,31 @@ async fn h_shelly(
         if flood {
             linktap_flood_stop_all(&rt).await;
         }
-        // Then forward to the cloud, best-effort, through the SAME /api/agent spool the heartbeat
-        // and every LinkTap report already use — one uplink, not two. The ORIGINAL event name and
-        // device id ride through untouched so the cloud's alert pipeline classifies, throttles,
-        // pushes and logs this exactly as it does a report that reached it directly. A hub in the
-        // path must be invisible to that pipeline.
-        spool_report(&rt, &crate::linktap_runtime::Report {
-            device: call.device.clone(),
-            event: call.event.clone(),
-            params: call.extras.clone(),
-        })
-        .await;
+        // Then forward to the cloud, best-effort. THROUGH `/api/shelly`, THE SAME DOOR THE SENSOR
+        // ITSELF WOULD HAVE USED, with the same per-vehicle webhook secret.
+        //
+        // 🔴 THIS USED TO GO THROUGH `/api/agent` AND WAS REJECTED 401 EVERY TIME. That endpoint
+        // authenticates a token against the token's OWN device, so the hub presenting its own
+        // credential for `shellyfloodg4-...` was refused — silently, until the daemon learned to log
+        // a non-2xx (same release). Real consequence, found 2026-08-31: every forwarded Shelly
+        // event was dropped, INCLUDING `flood.alarm`. With the uplink up nobody noticed, because the
+        // sensor also fires its own cloud hook — but with the uplink down and the hub spooling,
+        // which is the entire case the local ingest exists for, the alert never arrived at all.
+        //
+        // The comment this replaces stated the right goal — "the ORIGINAL event name and device id
+        // ride through untouched so the cloud's alert pipeline classifies, throttles, pushes and
+        // logs this exactly as it does a report that reached it directly; a hub in the path must be
+        // invisible to that pipeline" — and then picked the one door that cannot achieve it.
+        // `/api/shelly` achieves it by construction: same endpoint, same credential, same
+        // classification, no agent-path semantics (device caps, `agentSelf`) that a sensor's report
+        // was never meant to meet.
+        //
+        // ⚠️ NO NEW AUTHORITY. The hub already holds this secret — it is what authenticated the
+        // report on the way IN, so its presence here is guaranteed by the fact that we got this far.
+        // Anyone holding it can already report as any device on this vehicle; forwarding with it
+        // grants nothing that was not already true, which is why this is preferable to widening the
+        // agent-token vouch to cover every device id.
+        forward_shelly_to_cloud(&rt, &call).await;
     });
     answer_response(ok_json(&serde_json::json!({ "ok": true })))
 }
@@ -1389,6 +1403,40 @@ pub async fn linktap_flood_stop_all(rt: &Rt) {
                 params: vec![("error".into(), reply.error.unwrap_or_default()), ("cause".into(), "flood".into())],
             }).await;
         }
+    }
+}
+
+/// Forward a Shelly's report to the cloud AS THAT SHELLY — same endpoint and credential the sensor
+/// would have used itself, so the alert pipeline cannot tell a hub was in the path.
+///
+/// Best-effort, like every other outbound: a flood that cannot be forwarded has already had the
+/// valve closed locally, and blocking on the cloud would defeat the point of closing first.
+async fn forward_shelly_to_cloud(rt: &Rt, call: &ShellyCall) {
+    let cfg = hub_config::read_config_in(&rt.base);
+    if cfg.shelly_secret.is_empty() || cfg.vid.is_empty() {
+        // Unreachable in practice: an empty secret means the ingest refused this report long before
+        // here. Said out loud anyway, because "unreachable" and "silent" is how the last one hid.
+        crate::hlog!("shelly: cannot forward '{}' - no webhook secret", call.event);
+        return;
+    }
+    let base = rt.worker_base.trim_end_matches('/');
+    let Ok(mut u) = url::Url::parse(&format!("{base}/api/shelly")) else { return };
+    u.query_pairs_mut()
+        .append_pair("vid", &cfg.vid)
+        .append_pair("device", &call.device)
+        .append_pair("event", &call.event);
+    for (k, v) in &call.extras {
+        u.query_pairs_mut().append_pair(k, v);
+    }
+    // The secret goes on LAST and is never logged — the url is not printed anywhere below.
+    u.query_pairs_mut().append_pair("k", &cfg.shelly_secret);
+
+    let outcome = match http_client().get(u).send().await {
+        Err(e) => Some(format!("failed to send: {}", e.without_url())),
+        Ok(res) => report_refusal(res.status().as_u16(), &call.device),
+    };
+    if let Some(why) = outcome {
+        crate::hlog!("shelly: forward of '{}' {why}", call.event);
     }
 }
 
@@ -2484,6 +2532,65 @@ mod tests {
         hub_config::write_config_in(&base, &seeded_cfg()).unwrap(); // no linktap config whatsoever
         let rt = new_rt(base, "https://unused.example".into());
         linktap_flood_stop_all(&rt).await; // must simply return
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_shelly_report_goes_to_api_shelly_as_the_sensor_itself() {
+        // 🔴 THE FORWARD WAS 401'd EVERY TIME AND NOBODY KNEW. It went through /api/agent, which
+        // authenticates a token against the token's OWN device — so the hub presenting its own
+        // credential for a Shelly's id was refused. Every forwarded Shelly event was dropped, flood
+        // alarms included. With the uplink UP nobody noticed, because the sensor also fires its own
+        // cloud hook; with the uplink DOWN — the entire case the local ingest exists for — the alert
+        // never arrived at all.
+        //
+        // This pins the DOOR and the CREDENTIAL, because that is what was wrong, not the payload.
+        use std::sync::{Arc, Mutex};
+        let hits: Arc<Mutex<Vec<(String, HashMap<String, String>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let a = hits.clone();
+        let b = hits.clone();
+        let app = Router::new()
+            .route("/api/shelly", get(move |Query(q): Query<HashMap<String, String>>| {
+                let a = a.clone();
+                async move { a.lock().unwrap().push(("shelly".into(), q)); "ok" }
+            }))
+            .route("/api/agent", get(move |Query(q): Query<HashMap<String, String>>| {
+                let b = b.clone();
+                async move { b.lock().unwrap().push(("agent".into(), q)); "ok" }
+            }));
+        let wl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let worker = format!("http://{}", wl.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(wl, app).await.unwrap() });
+
+        let base = temp_base("shelly_forward");
+        hub_config::write_config_in(&base, &shelly_cfg("s3cr3t")).unwrap();
+        let rt = new_rt(base, worker);
+        let hl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", hl.local_addr().unwrap());
+        let hub_app = router(rt.clone());
+        tokio::spawn(async move {
+            axum::serve(hl, hub_app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap()
+        });
+
+        let c = reqwest::Client::new();
+        let r = c.get(format!("{origin}/api/hub/shelly?vid=v1&event=temperature.change&device=sh_salon&k=s3cr3t&tC=21.5"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200);
+
+        // The forward is spawned so the sensor never waits on it — poll rather than race.
+        let mut found = None;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let g = hits.lock().unwrap();
+            if let Some(h) = g.first() { found = Some(h.clone()); break; }
+        }
+        let (door, q) = found.expect("the report was never forwarded at all");
+        assert_eq!(door, "shelly", "must go through /api/shelly, the door a sensor itself uses — /api/agent 401s");
+        assert_eq!(q["device"], "sh_salon", "the sensor's OWN id rides through, so the cloud classifies it identically");
+        assert_eq!(q["event"], "temperature.change");
+        assert_eq!(q["vid"], "v1");
+        assert_eq!(q["k"], "s3cr3t", "authenticated with the vehicle webhook secret, exactly as the sensor would");
+        assert_eq!(q["tC"], "21.5", "and the device's own params are passed through untouched");
+        assert!(!q.contains_key("t"), "the hub's agent token has no business on a webhook forward");
     }
 
     #[tokio::test]
