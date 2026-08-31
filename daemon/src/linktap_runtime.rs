@@ -23,6 +23,19 @@ pub struct Track {
     pub profile: Option<WireProfile>,
     /// Last `is_flm_plugin` seen — a non-metering valve is bounded by TIME only, said once.
     pub meters: Option<bool>,
+    /// A reopen this valve is owed, decided in `observe` and PERFORMED by the caller — the same
+    /// split `Action::Stop` already uses, so all gateway I/O stays in one place.
+    pending_open: Option<PendingOpen>,
+}
+
+/// A reopen the hub owes a valve: auto-restart of a Normal Run, or the Normal Run a washdown was
+/// told to resume. Mode is always Normal — both paths return the valve to its profile.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PendingOpen {
+    pub duration_secs: u64,
+    pub volume_cap_l: f64,
+    /// Why we are reopening, for the log line. "auto-restart" or "washdown resume".
+    pub why: &'static str,
 }
 
 /// A per-valve profile as the worker sends it. Every field OPTIONAL: the worker omits what the
@@ -55,7 +68,7 @@ impl Runtime {
         for id in dev_ids {
             let id = linktap::normalize_dev_id(id);
             if !id.is_empty() {
-                tracks.insert(id, Track { state: State::Idle, ledger: None, profile: None, meters: None });
+                tracks.insert(id, Track { state: State::Idle, ledger: None, profile: None, meters: None, pending_open: None });
             }
         }
         Runtime { gateway, unit: VolUnit::Gal, default_profile, tracks }
@@ -97,9 +110,10 @@ impl Runtime {
         mode: cycle::Mode,
         duration_secs: u64,
         volume_cap_l: f64,
+        resume_normal: bool,
     ) -> Result<(), String> {
         let id = linktap::normalize_dev_id(dev_id);
-        let state = cycle::start_hub_cycle(at, mode, duration_secs, volume_cap_l)?;
+        let state = cycle::start_hub_cycle(at, mode, duration_secs, volume_cap_l, resume_normal)?;
         match self.tracks.get_mut(&id) {
             Some(track) => {
                 track.state = state;
@@ -109,6 +123,13 @@ impl Runtime {
             // against a future caller rather than a path we expect to take.
             None => Err(format!("valve {id} is not watched by this hub")),
         }
+    }
+
+    /// Take the reopen this valve is owed, if any. Taking CLEARS it, so a caller that fails to
+    /// perform the open does not retry it on every poll for the rest of the day — a valve that
+    /// silently reopens minutes later is worse than one that stayed shut and said so.
+    pub fn take_pending_open(&mut self, dev_id: &str) -> Option<PendingOpen> {
+        self.tracks.get_mut(&linktap::normalize_dev_id(dev_id))?.pending_open.take()
     }
 
     /// Read one track's RUNNING cycle for assertions: (provenance, duration_secs, cap_l). `None`
@@ -166,6 +187,27 @@ impl Runtime {
         if let Some(ended) = &r.ended {
             let ledger = cycle::apply_to_ledger(track.ledger.as_ref(), ended);
             track.ledger = Some(ledger);
+            // 🔴 THE REOPEN, DECIDED HERE AND PERFORMED BY THE CALLER. Both of these decisions
+            // already existed as tested pure functions and NEITHER was ever called: `should_restart`
+            // had no production caller at all, and the washdown resume lived only in the app, in an
+            // unpersisted React ref that died with the page. `linktap_act`'s own doc comment claimed
+            // it restarted on a timer expiry while its body only ever issued stops.
+            //
+            // Resume is checked FIRST: a washdown that was told to resume is answering an explicit
+            // instruction attached to that run, where auto-restart is a standing profile switch.
+            if cycle::should_resume_normal(ended) {
+                track.pending_open = Some(PendingOpen {
+                    duration_secs: profile.duration_secs,
+                    volume_cap_l: profile.volume_cap_l,
+                    why: "washdown resume",
+                });
+            } else if cycle::should_auto_restart(ended, profile.auto_restart) {
+                track.pending_open = Some(PendingOpen {
+                    duration_secs: profile.duration_secs,
+                    volume_cap_l: profile.volume_cap_l,
+                    why: "auto-restart",
+                });
+            }
             reports.push(Report {
                 device: format!("lt_{id}"),
                 // `.change` so it batches — a cycle end is history, not an alarm, and the worker
@@ -682,6 +724,38 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_washdown_queues_the_normal_run_it_was_told_to_resume() {
+        // End to end through the runtime: the reopen must be QUEUED for the caller, because all
+        // gateway I/O lives in linktap_act. Before this, `should_restart` had no production caller
+        // at all and the washdown resume lived only in the app's memory.
+        let mut r = rt(VolUnit::Litre);
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, true).expect("our valve");
+        // Watering, then the timer expires and the gateway reports it closed.
+        r.observe(DEV, &json!({"is_watering":1,"vol":2.0}), T0 + 1000);
+        r.observe(DEV, &json!({"is_watering":0,"vol":9.0}), T0 + 300_000);
+
+        let open = r.take_pending_open(DEV).expect("a washdown that was told to resume");
+        assert_eq!(open.why, "washdown resume");
+        // The valve's PROFILE decides the run, not the washdown's own numbers.
+        assert_eq!(open.duration_secs, 24 * 3600);
+        assert!((open.volume_cap_l - 100.0).abs() < 0.01);
+        // Taking clears it: a caller that fails must not silently reopen the valve on a later poll.
+        assert!(r.take_pending_open(DEV).is_none(), "taking clears the pending open");
+    }
+
+    #[test]
+    fn a_washdown_stopped_by_a_flood_never_reopens_the_valve() {
+        // The one that would matter most. A flood closes the valve mid-washdown; the resume
+        // instruction attached to that run must die with it.
+        let mut r = rt(VolUnit::Litre);
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, true).expect("our valve");
+        r.observe(DEV, &json!({"is_watering":1,"vol":2.0}), T0 + 1000);
+        r.note_stop(DEV, EndReason::FloodShutoff);
+        r.observe(DEV, &json!({"is_watering":0,"vol":3.0}), T0 + 60_000);
+        assert!(r.take_pending_open(DEV).is_none(), "a flood-stopped washdown must stay shut");
+    }
+
+    #[test]
     fn a_run_the_hub_opened_is_its_own_not_an_adopted_one() {
         // 🔴 THE BUG THIS PINS. `cycle::start_hub_cycle` was dead code — nothing outside its own
         // unit tests called it — so the ONLY way a track left Idle was `adopt_cycle`. The hub
@@ -692,7 +766,7 @@ mod tests {
         // doc `runProvenance: "adopted"`. No restart, no external press — the hub just never told
         // itself what it had done.
         let mut r = rt(VolUnit::Litre);
-        r.note_hub_open(DEV, T0, cycle::Mode::Normal, 86_400, 1135.6).expect("our own valve");
+        r.note_hub_open(DEV, T0, cycle::Mode::Normal, 86_400, 1135.6, false).expect("our own valve");
 
         // The gateway now reports it watering, exactly as it would for an external open. The
         // difference must come from what we recorded, not from what the hardware says.
@@ -713,7 +787,7 @@ mod tests {
         // The outlawed shape guarded in start_hub_cycle, reached through the new door: a washdown
         // carries NO volume cap, and seeding one must not be able to smuggle one in.
         let mut r = rt(VolUnit::Litre);
-        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 7200, 0.0).expect("a washdown");
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 7200, 0.0, false).expect("a washdown");
         let (_, reports) = r.observe(DEV, &json!({"is_watering":1,"vol":1.0,"speed":5.5}), T0 + 1000);
         let m = reports.iter().find(|x| x.event == "linktap.measurement").expect("a measurement");
         let p = |k: &str| m.params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
@@ -722,14 +796,14 @@ mod tests {
         assert_eq!(p("cap_l"), Some("0.00".into()), "a washdown is bounded by TIME only");
 
         // And the outlawed combination is still refused at the door.
-        assert!(r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 7200, 50.0).is_err(),
+        assert!(r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 7200, 50.0, false).is_err(),
             "a washdown with a volume cap is the shape the owner outlawed");
     }
 
     #[test]
     fn seeding_a_valve_this_hub_does_not_watch_is_refused() {
         let mut r = rt(VolUnit::Litre);
-        assert!(r.note_hub_open("0000000000000000", T0, cycle::Mode::Normal, 60, 10.0).is_err());
+        assert!(r.note_hub_open("0000000000000000", T0, cycle::Mode::Normal, 60, 10.0, false).is_err());
     }
 
     #[test]
