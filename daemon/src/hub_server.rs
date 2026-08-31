@@ -1407,12 +1407,62 @@ async fn spool_report(rt: &Rt, report: &crate::linktap_runtime::Report) {
         .append_pair("device", &report.device)
         .append_pair("event", &report.event)
         .append_pair("t", &cfg.token);
+    // ⚠️ NAME OURSELVES AS THE VOUCHER. `/api/agent` authenticates a token against the token's OWN
+    // device, which is right for a router agent reporting as itself and wrong for a hub, whose job
+    // is to speak for hardware that has no cloud credential — a LinkTap valve is driven over the
+    // LAN and has never enrolled with anything.
+    //
+    // Without this the worker looks up `agenttoken_lt_<valve>`, finds nothing, and answers 401.
+    // That is not hypothetical: it is what happened to EVERY linktap.measurement from 2026-08-26 to
+    // 2026-08-31, leaving the vehicle with no valve state in the cloud at all.
+    //
+    // The claim is explicit on purpose — the worker verifies this token against THIS hub id and
+    // then allows only `lt_*` devices (cloud-server agentToken.ts::hubMayReportFor). Nothing is
+    // inferred from the shape of the request, so a token that is not a hub's vouches for nothing.
+    if !cfg.hub_id.is_empty() {
+        u.query_pairs_mut().append_pair("hub", &cfg.hub_id);
+    }
     for (k, v) in &report.params {
         u.query_pairs_mut().append_pair(k, v);
     }
-    if let Err(e) = http_client().get(u).send().await {
-        crate::hlog!("linktap: report {} failed: {e}", report.event);
+    // 🔴 A NON-2xx IS A FAILURE. This used to be `if let Err(e) = ...send()`, which catches only a
+    // TRANSPORT error — a refusal is a perfectly good HTTP response, so `Ok(401)` fell through as
+    // success and logged nothing.
+    //
+    // That is not a tidiness point. Every `linktap.measurement` this hub has ever sent was answered
+    // 401 (the hub's token authenticates it for its OWN device id, not for `lt_<valve>`), so the
+    // vehicle's valve telemetry had been dead in the cloud since 2026-08-26 — four days — while the
+    // log stayed clean and every check said the reports were fine. The bug that hid the bug.
+    //
+    // Best-effort still: telemetry that cannot be delivered must never block the valve logic that
+    // produced it. Best-effort means DO NOT RETRY HERE, not DO NOT MENTION IT.
+    let outcome = match http_client().get(u).send().await {
+        Err(e) => Some(format!("failed to send: {}", e.without_url())),
+        Ok(res) => report_refusal(res.status().as_u16(), &report.device),
+    };
+    if let Some(why) = outcome {
+        crate::hlog!("linktap: report {} {why}", report.event);
     }
+}
+
+/// PURE: is this response a failure worth saying out loud, and what should the line say?
+///
+/// ⚠️ THE RULE THIS PINS IS THE ONE THAT WAS WRONG. `spool_report` used to check only for a
+/// TRANSPORT error, so `Ok(401)` fell through as success and logged nothing. Every
+/// `linktap.measurement` this hub sent was answered 401 — the hub's token authenticates it for its
+/// OWN device id, not for `lt_<valve>` — so the vehicle's valve telemetry was dead in the cloud
+/// from 2026-08-26 for four days while the log stayed clean and every check said reports were fine.
+///
+/// Split out because the bug was a MISSING BRANCH, and a missing branch in an async fire-and-forget
+/// I/O path is exactly the thing no test was ever going to reach.
+pub fn report_refusal(status: u16, device: &str) -> Option<String> {
+    if (200..300).contains(&status) {
+        return None;
+    }
+    // The status is the whole point of the line: 401 (this hub may not speak for that device) and
+    // 500 (the cloud is broken) are different problems, and whoever reads this log is trying to
+    // tell them apart.
+    Some(format!("REFUSED by the cloud: HTTP {status} (device {device})"))
 }
 
 fn now_ms() -> i64 {
@@ -1892,6 +1942,22 @@ mod tests {
         assert_eq!(r.status(), 409);
         assert_eq!(hub_config::read_config_in(&base).vid, "v1"); // untouched
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_non_2xx_report_is_a_failure_and_says_which_one() {
+        // 🔴 THE BUG THAT HID A BUG. Only a transport error used to count, so a 401 was silently
+        // treated as a delivered report. The vehicle's valve telemetry was dead in the cloud for
+        // four days while this log stayed clean.
+        assert_eq!(report_refusal(200, "lt_x"), None);
+        assert_eq!(report_refusal(204, "lt_x"), None);
+        let r = report_refusal(401, "lt_3CC1C335004B1200").expect("401 is a refusal");
+        assert!(r.contains("401"), "the status must be in the line: {r}");
+        assert!(r.contains("lt_3CC1C335004B1200"), "and the device, so it can be told apart: {r}");
+        // A server fault is a different problem from a refusal and must be distinguishable.
+        assert!(report_refusal(500, "lt_x").unwrap().contains("500"));
+        // A redirect is not a delivery either — the report did not land where it was addressed.
+        assert!(report_refusal(302, "lt_x").is_some());
     }
 
     #[tokio::test]
