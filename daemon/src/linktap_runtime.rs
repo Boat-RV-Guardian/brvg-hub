@@ -76,6 +76,57 @@ impl Runtime {
         }
     }
 
+    /// Record that THIS HUB just opened a valve.
+    ///
+    /// 🔴 WITHOUT THIS, THE HUB ADOPTS ITS OWN RUNS. `cycle::start_hub_cycle` existed from the
+    /// start and was called by NOTHING outside its own unit tests: the only way a track ever left
+    /// `Idle` was `observe` seeing `is_watering` and running `adopt_cycle`. So a run the hub had
+    /// just programmed came back a poll later stamped `Provenance::Adopted`, and the app — reading
+    /// `prov` — drew the owner's own 24h run as "Started Externally / Time Remaining Unknown".
+    ///
+    /// Observed on MVP 2026-08-31: `linktap: open 3CC1C335004B1200 ok` at 14:43:45, and the very
+    /// next cloud doc carried `runProvenance: "adopted"`. No restart involved — the hub simply
+    /// never told itself what it had done.
+    ///
+    /// Seeded at the moment of the successful open so the NEXT `observe` takes the `State::Running`
+    /// branch and continues this cycle, rather than the `Idle` branch that adopts one.
+    pub fn note_hub_open(
+        &mut self,
+        dev_id: &str,
+        at: i64,
+        mode: cycle::Mode,
+        duration_secs: u64,
+        volume_cap_l: f64,
+    ) -> Result<(), String> {
+        let id = linktap::normalize_dev_id(dev_id);
+        let state = cycle::start_hub_cycle(at, mode, duration_secs, volume_cap_l)?;
+        match self.tracks.get_mut(&id) {
+            Some(track) => {
+                track.state = state;
+                Ok(())
+            }
+            // Not a valve this hub watches. do_valve already refuses those, so this is a guard
+            // against a future caller rather than a path we expect to take.
+            None => Err(format!("valve {id} is not watched by this hub")),
+        }
+    }
+
+    /// Read one track's RUNNING cycle for assertions: (provenance, duration_secs, cap_l). `None`
+    /// when the valve is not watched or is idle, so `Some` already means running. Test-facing, but
+    /// not `#[cfg(test)]` — the wiring test lives in hub_server, a different module in this crate.
+    #[doc(hidden)]
+    pub fn debug_track(&self, dev_id: &str) -> Option<(&'static str, u64, f64)> {
+        let id = linktap::normalize_dev_id(dev_id);
+        match &self.tracks.get(&id)?.state {
+            cycle::State::Running(r) => Some((
+                match r.provenance { cycle::Provenance::Hub => "hub", cycle::Provenance::Adopted => "adopted" },
+                r.duration_secs,
+                r.volume_cap_l,
+            )),
+            cycle::State::Idle => None,
+        }
+    }
+
     /// Apply per-valve profiles from a worker reply. Valves it does not name keep the default —
     /// what arrives IS the current truth for the valves it names.
     pub fn apply_profiles(&mut self, profiles: &HashMap<String, WireProfile>) {
@@ -628,6 +679,57 @@ mod tests {
         assert_eq!(b[0].0, DEV, "long ids normalise to the canonical 16");
         assert!(parse_gateway_push("not json").is_empty());
         assert!(parse_gateway_push("{}").is_empty());
+    }
+
+    #[test]
+    fn a_run_the_hub_opened_is_its_own_not_an_adopted_one() {
+        // 🔴 THE BUG THIS PINS. `cycle::start_hub_cycle` was dead code — nothing outside its own
+        // unit tests called it — so the ONLY way a track left Idle was `adopt_cycle`. The hub
+        // therefore adopted RUNS IT HAD JUST ISSUED, and the app drew the owner's own 24h run as
+        // "Started Externally / Time Remaining Unknown / Infinite".
+        //
+        // Observed on MVP 2026-08-31: `linktap: open 3CC1C335004B1200 ok` at 14:43:45, next cloud
+        // doc `runProvenance: "adopted"`. No restart, no external press — the hub just never told
+        // itself what it had done.
+        let mut r = rt(VolUnit::Litre);
+        r.note_hub_open(DEV, T0, cycle::Mode::Normal, 86_400, 1135.6).expect("our own valve");
+
+        // The gateway now reports it watering, exactly as it would for an external open. The
+        // difference must come from what we recorded, not from what the hardware says.
+        let (_, reports) = r.observe(DEV, &json!({"is_watering":1,"vol":3.2,"remain_duration":212,"speed":5.5}), T0 + 1000);
+        let m = reports.iter().find(|x| x.event == "linktap.measurement").expect("a measurement");
+        let p = |k: &str| m.params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+
+        assert_eq!(p("prov"), Some("hub".into()), "we opened it — this is not an adopted run");
+        // AND the targets are the ones WE issued, not the hardware's remaining time. `remain_duration`
+        // above says 212s; adopting would have taken it and reported a 212-second run.
+        assert_eq!(p("dur_s"), Some("86400".into()), "our duration, not the gateway's remainder");
+        assert_eq!(p("cap_l"), Some("1135.60".into()), "our cap, not the profile default");
+        assert_eq!(p("mode"), Some("normal".into()));
+    }
+
+    #[test]
+    fn a_washdown_the_hub_opened_is_time_only() {
+        // The outlawed shape guarded in start_hub_cycle, reached through the new door: a washdown
+        // carries NO volume cap, and seeding one must not be able to smuggle one in.
+        let mut r = rt(VolUnit::Litre);
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 7200, 0.0).expect("a washdown");
+        let (_, reports) = r.observe(DEV, &json!({"is_watering":1,"vol":1.0,"speed":5.5}), T0 + 1000);
+        let m = reports.iter().find(|x| x.event == "linktap.measurement").expect("a measurement");
+        let p = |k: &str| m.params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(p("prov"), Some("hub".into()));
+        assert_eq!(p("mode"), Some("washdown".into()));
+        assert_eq!(p("cap_l"), Some("0.00".into()), "a washdown is bounded by TIME only");
+
+        // And the outlawed combination is still refused at the door.
+        assert!(r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 7200, 50.0).is_err(),
+            "a washdown with a volume cap is the shape the owner outlawed");
+    }
+
+    #[test]
+    fn seeding_a_valve_this_hub_does_not_watch_is_refused() {
+        let mut r = rt(VolUnit::Litre);
+        assert!(r.note_hub_open("0000000000000000", T0, cycle::Mode::Normal, 60, 10.0).is_err());
     }
 
     #[test]

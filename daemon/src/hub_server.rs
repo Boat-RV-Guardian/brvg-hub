@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::hub_config::{self, HubConfig, MemberKey};
 use crate::linktap;
+use crate::cycle;
 
 /// Production worker base — the Rust twin of DEFAULT_WORKER_URL (configSync.ts). Pinned for the
 /// same reason as the TS side: this process holds a credential, so it talks only to first party.
@@ -1691,6 +1692,38 @@ async fn do_valve(rt: &Rt, caller: &Caller, body: &[u8]) -> Answer {
         return err(502, &format!("the gateway did not accept that command: {detail}"));
     }
     crate::hlog!("linktap: {} {} ok", req.action, dev_id);
+
+    // 🔴 TELL OURSELVES WHAT WE JUST DID. Until this call the hub learned about its OWN opens the
+    // same way it learned about a press on the tap — by polling the gateway and finding the valve
+    // already running — so `cycle::step` took the `Idle` branch and ADOPTED the run. The targets
+    // were then the profile's rather than the ones we had just issued, and `prov` went out as
+    // `adopted`, which the app renders as "Started Externally".
+    //
+    // A close needs no equivalent: `observe` sees `is_watering` go false and ends the cycle with
+    // the provenance the Running state already carries.
+    if req.action == "open" {
+        if let Some(secs) = req.duration_secs {
+            let mode = cycle::Mode::from_wire(req.mode.as_deref().unwrap_or("normal"));
+            let mut guard = rt.linktap.lock().await;
+            if let Some(runtime) = guard.as_mut() {
+                // A washdown is time-only, so its cap is 0. Anything else MUST carry one; when the
+                // caller omitted it we fall back to the valve's effective profile rather than
+                // refusing — the gateway already has the command, so the choice here is between
+                // tracking the run with a sane cap and not tracking it at all.
+                let cap_l = match mode {
+                    cycle::Mode::Washdown => 0.0,
+                    _ => req.volume_cap_l.unwrap_or_else(|| runtime.profile_for(&dev_id).volume_cap_l),
+                };
+                if let Err(e) = runtime.note_hub_open(&dev_id, now_ms(), mode, secs, cap_l) {
+                    // Never fail the caller for this: the valve IS open, which is what they asked
+                    // for. Say it out loud, because a silent miss here reads as "started externally"
+                    // in the app and nowhere else.
+                    crate::hlog!("linktap: could not record our own open of {dev_id}: {e}");
+                }
+            }
+        }
+    }
+
     ok_json(&serde_json::json!({ "ok": true }))
 }
 
@@ -2132,6 +2165,58 @@ mod tests {
             .header("content-type", "application/json")
             .body(body.to_string())
             .send().await.unwrap()
+    }
+
+    /// A gateway that ACCEPTS, unlike `valve_cfg`'s discard port — needed because the wiring under
+    /// test runs only after a command actually succeeds.
+    async fn accepting_gateway() -> String {
+        async fn api(body: String) -> String {
+            // cmd 16 is the config/unit read do_valve makes to express a cap in the gateway's unit;
+            // everything else (cmd 6 open, cmd 7 close) simply succeeds.
+            if body.contains("\"cmd\":16") || body.contains("\"cmd\": 16") {
+                r#"<html><body><!--#RET-->{"cmd":16,"gw_id":"GW02","vol_unit":"L","end_dev":["aaaabbbbccccdddd"]}</body></html>"#.to_string()
+            } else {
+                r#"<html><body><!--#RET-->{"cmd":6,"gw_id":"GW02","ret":0}</body></html>"#.to_string()
+            }
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/api.shtml", post(api))).await.unwrap()
+        });
+        addr.to_string()
+    }
+
+    #[tokio::test]
+    async fn an_open_issued_through_the_api_is_recorded_as_the_hubs_own_run() {
+        // 🔴 THE WIRING for the bug pinned in linktap_runtime's tests. do_valve sent the command and
+        // told the runtime NOTHING, so the watcher met an already-open valve on its next poll and
+        // adopted it — the hub adopting a run it had just issued itself. The app reads `prov` and
+        // drew the owner's own 24h run as "Started Externally".
+        let gw = accepting_gateway().await;
+        let base = temp_base("valve_prov");
+        let mut cfg = valve_cfg(true);
+        cfg.linktap.host = gw;
+        hub_config::write_config_in(&base, &cfg).unwrap();
+        let (origin, rt) = spawn_server(base, vec![key("owner")]).await;
+
+        // The watcher owns this in production; seed it here so the handler has a runtime to talk to.
+        *rt.linktap.lock().await = Some(crate::linktap_runtime::Runtime::new(
+            linktap::Gateway { host: cfg.linktap.host.clone(), gw_id: "GW02".into() },
+            &["aaaabbbbccccdddd".to_string()],
+            cycle::Profile { duration_secs: 86_400, volume_cap_l: 1135.6, auto_restart: false },
+        ));
+
+        let r = post_valve(&origin, &key("owner"),
+            r#"{"devId":"aaaabbbbccccdddd","action":"open","durationSecs":3600,"volumeCapL":200.0,"mode":"normal"}"#).await;
+        assert_eq!(r.status(), 200, "the open must succeed for the recording to matter");
+
+        let guard = rt.linktap.lock().await;
+        let runtime = guard.as_ref().expect("seeded above");
+        let (prov, dur, cap) = runtime.debug_track("aaaabbbbccccdddd").expect("a watched, RUNNING valve");
+        assert_eq!(prov, "hub", "we issued this open — it is not an adopted run");
+        assert_eq!(dur, 3600, "the duration WE asked for");
+        assert!((cap - 200.0).abs() < 0.01, "the cap WE asked for, got {cap}");
     }
 
     #[tokio::test]
