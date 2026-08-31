@@ -98,6 +98,9 @@ pub struct Running {
     /// The app's "Start 'Normal Run' when timer expires" checkbox, carried BY THE RUN so the hub
     /// can honour it without the app being open. Only meaningful for a washdown.
     pub resume_normal: bool,
+    /// Set once the hub has REPROGRAMMED this valve into its Normal Run ahead of the washdown
+    /// expiring, so the handover is issued exactly once. See `should_hand_over`.
+    pub handover_issued: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +164,7 @@ pub fn start_hub_cycle(at: i64, mode: Mode, duration_secs: u64, volume_cap_l: f6
         volume_l: 0.0,
         provenance: Provenance::Hub,
         stop_issued: None,
+        handover_issued: false,
         // Only a washdown can carry it: resuming Normal Run after a Normal Run is auto-restart,
         // which is a separate decision with its own profile switch.
         resume_normal: resume_normal && mode == Mode::Washdown,
@@ -178,6 +182,7 @@ pub fn adopt_cycle(at: i64, profile: &Profile, remain_secs: Option<u64>) -> Runn
         volume_l: 0.0,
         provenance: Provenance::Adopted,
         stop_issued: None,
+        handover_issued: false,
         // An adopted run carries no intent of ours — we did not issue it.
         resume_normal: false,
     }
@@ -277,6 +282,50 @@ pub fn step(state: &State, obs: Observation, profile: &Profile) -> StepResult {
             StepResult { state: State::Idle, action: Action::None, ended: Some(ended) }
         }
     }
+}
+
+/// How long BEFORE a washdown expires the hub reprograms the valve into its Normal Run.
+///
+/// 🔴 WHY A HANDOVER EXISTS AT ALL. Owner, MVP 2026-08-31: *"it did resume, but it took forever...
+/// would be nice if it reprogrammed it right before it was going to stop, so it never stops the
+/// water flow during the changing of the plans."*
+///
+/// Waiting for the close and THEN reopening cannot be quick: the hub learns a cycle ended by
+/// polling, and `LINKTAP_POLL_SECS` is 60. Measured on MVP — closed at 14:57:04, watering again at
+/// 14:57:34: THIRTY SECONDS of dry pipe, and a poll landing less kindly would have made it a full
+/// minute. Reopening faster is not the fix; not closing at all is.
+///
+/// LinkTap's cmd 6 on an ALREADY-OPEN valve reprograms it in place — that is exactly what the
+/// app's "override with wash down" does — so issuing the Normal Run before the washdown's timer
+/// expires swaps the plan underneath a valve that never shuts.
+///
+/// The lead must be long enough that a poll is GUARANTEED to land inside the window while the
+/// valve is still running; a window shorter than the poll interval can be stepped straight over,
+/// putting us back on the slow path. The poll loop tightens its cadence when a handover is near
+/// (`Runtime::poll_hint`), which is what lets this stay short enough to be "right before it stops"
+/// rather than a minute of washdown sacrificed to scheduling.
+pub const HANDOVER_LEAD_SECS: u64 = 20;
+
+/// Should the hub reprogram this running cycle into its Normal Run NOW, rather than waiting for it
+/// to close?
+///
+/// ONLY a hub-issued washdown that was told to resume, and only once (`handover_issued`). A
+/// washdown with a stop already issued — flood, manual, volume cap — is on its way shut on purpose
+/// and must never be handed over into a fresh run.
+pub fn should_hand_over(run: &Running, remain_secs: Option<u64>, now_ms: i64, lead_secs: u64) -> bool {
+    if run.handover_issued || run.stop_issued.is_some() { return false; }
+    if run.mode != Mode::Washdown || !run.resume_normal { return false; }
+    if run.provenance != Provenance::Hub { return false; }
+    // The GATEWAY's own remaining time when it offers one — it is the clock the valve will
+    // actually stop on. Falling back to our own arithmetic keeps a non-reporting gateway working.
+    let left = match remain_secs {
+        Some(r) => r,
+        None => {
+            let elapsed = ((now_ms - run.started_at) / 1000).max(0) as u64;
+            run.duration_secs.saturating_sub(elapsed)
+        }
+    };
+    left <= lead_secs
 }
 
 /// Should this end be followed by a NORMAL RUN, because the washdown that just finished was told

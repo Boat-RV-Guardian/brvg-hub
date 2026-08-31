@@ -11,6 +11,7 @@
 //! Both funnel into ONE `observe()` — the machine cannot tell them apart, which is the point.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::cycle::{self, Action, EndReason, Ledger, Profile, State};
 use crate::linktap::{self, Gateway, VolUnit};
@@ -125,6 +126,31 @@ impl Runtime {
         }
     }
 
+    /// How long the poll loop may sleep before it MUST look again.
+    ///
+    /// A washdown that is about to hand over needs a poll inside its lead window, and the standing
+    /// cadence (60s) is wider than the window — so a plain fixed interval could step straight over
+    /// it and drop us back on the slow close-then-reopen path the handover exists to avoid.
+    /// Returns `None` when nothing is time-critical, and the caller keeps its normal cadence.
+    pub fn poll_hint(&self, now_ms: i64) -> Option<Duration> {
+        let mut soonest: Option<u64> = None;
+        for (id, track) in &self.tracks {
+            let State::Running(run) = &track.state else { continue };
+            if run.handover_issued || run.stop_issued.is_some() { continue; }
+            if run.mode != cycle::Mode::Washdown || !run.resume_normal { continue; }
+            if run.provenance != cycle::Provenance::Hub { continue; }
+            let _ = id;
+            let elapsed = ((now_ms - run.started_at) / 1000).max(0) as u64;
+            let left = run.duration_secs.saturating_sub(elapsed);
+            // Aim to be looking a little before the lead window opens, so the first poll inside it
+            // is early rather than exactly on the boundary.
+            let until = left.saturating_sub(cycle::HANDOVER_LEAD_SECS);
+            soonest = Some(soonest.map_or(until, |s: u64| s.min(until)));
+        }
+        // Floor at 5s: a valve seconds from handover must not spin the gateway.
+        soonest.map(|s| Duration::from_secs(s.max(5)))
+    }
+
     /// Take the reopen this valve is owed, if any. Taking CLEARS it, so a caller that fails to
     /// perform the open does not retry it on every poll for the rest of the day — a valve that
     /// silently reopens minutes later is worse than one that stayed shut and said so.
@@ -182,6 +208,25 @@ impl Runtime {
         let obs = cycle::Observation { at: now_ms, watering, volume_l, remain_secs: remain, speed_lpm };
         let r = cycle::step(&track.state, obs, &profile);
         track.state = r.state;
+
+        // 🔴 THE SEAMLESS HANDOVER, decided while the valve is STILL OPEN. Owner, MVP 2026-08-31:
+        // "it did resume, but it took forever... would be nice if it reprogrammed it right before
+        // it was going to stop, so it never stops the water flow during the changing of the plans."
+        //
+        // The resume-after-close path below cannot be quick — we learn a cycle ended by polling,
+        // and the poll is a minute apart. Measured: 30 seconds of dry pipe. So we do not wait for
+        // the close; we reprogram the valve into its Normal Run just before its timer expires, and
+        // it never shuts. `handover_issued` makes it exactly once.
+        if let State::Running(run) = &mut track.state {
+            if cycle::should_hand_over(run, remain, now_ms, cycle::HANDOVER_LEAD_SECS) {
+                run.handover_issued = true;
+                track.pending_open = Some(PendingOpen {
+                    duration_secs: profile.duration_secs,
+                    volume_cap_l: profile.volume_cap_l,
+                    why: "washdown handover",
+                });
+            }
+        }
 
         let mut reports = Vec::new();
         if let Some(ended) = &r.ended {
@@ -721,6 +766,64 @@ mod tests {
         assert_eq!(b[0].0, DEV, "long ids normalise to the canonical 16");
         assert!(parse_gateway_push("not json").is_empty());
         assert!(parse_gateway_push("{}").is_empty());
+    }
+
+    #[test]
+    fn a_washdown_hands_over_before_it_expires_so_the_water_never_stops() {
+        // 🔴 OWNER, MVP 2026-08-31: "it did resume, but it took forever... would be nice if it
+        // reprogrammed it right before it was going to stop, so it never stops the water flow
+        // during the changing of the plans."
+        //
+        // Measured on the boat: closed 14:57:04, watering again 14:57:34 — 30s of dry pipe, because
+        // the hub only learns a cycle ended by polling and the poll is 60s apart. The handover
+        // reprograms the OPEN valve instead, so it never shuts.
+        let mut r = rt(VolUnit::Litre);
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, true).expect("our valve");
+
+        r.observe(DEV, &json!({"is_watering":1,"vol":1.0,"remain_duration":200}), T0 + 100_000);
+        assert!(r.take_pending_open(DEV).is_none(), "200s left is not the time to hand over");
+
+        // Inside the lead window, valve STILL OPEN.
+        r.observe(DEV, &json!({"is_watering":1,"vol":8.0,"remain_duration":15}), T0 + 285_000);
+        let open = r.take_pending_open(DEV).expect("a handover");
+        assert_eq!(open.why, "washdown handover");
+        assert_eq!(open.duration_secs, 24 * 3600, "the valve's Normal Run profile");
+        assert!((open.volume_cap_l - 100.0).abs() < 0.01);
+
+        // Exactly once — a second poll inside the window must not re-issue.
+        r.observe(DEV, &json!({"is_watering":1,"vol":8.5,"remain_duration":8}), T0 + 292_000);
+        assert!(r.take_pending_open(DEV).is_none(), "handover is issued once");
+    }
+
+    #[test]
+    fn a_washdown_being_stopped_never_hands_over() {
+        // The dangerous case: a flood closes the valve inside the lead window. Handing over there
+        // would reopen the water on a vessel that is flooding.
+        let mut r = rt(VolUnit::Litre);
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, true).expect("our valve");
+        r.observe(DEV, &json!({"is_watering":1,"vol":1.0,"remain_duration":200}), T0 + 100_000);
+        r.note_stop(DEV, EndReason::FloodShutoff);
+        r.observe(DEV, &json!({"is_watering":1,"vol":8.0,"remain_duration":15}), T0 + 285_000);
+        assert!(r.take_pending_open(DEV).is_none(), "a valve on its way shut must stay shut");
+    }
+
+    #[test]
+    fn the_poll_loop_is_told_to_look_again_before_a_handover_window() {
+        let mut r = rt(VolUnit::Litre);
+        assert!(r.poll_hint(T0).is_none(), "an idle valve asks for nothing");
+
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, true).expect("our valve");
+        // 300s run, 100s elapsed, 200s left, 20s lead -> look again in ~180s (the caller still caps
+        // this at its own 60s cadence).
+        assert_eq!(r.poll_hint(T0 + 100_000).expect("a washdown that will hand over").as_secs(), 180);
+
+        // Never busier than every 5s, however close the handover is.
+        assert_eq!(r.poll_hint(T0 + 299_000).expect("seconds from handover").as_secs(), 5);
+
+        // A washdown with no resume asked for is not time-critical.
+        let mut plain = rt(VolUnit::Litre);
+        plain.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, false).unwrap();
+        assert!(plain.poll_hint(T0 + 100_000).is_none());
     }
 
     #[test]

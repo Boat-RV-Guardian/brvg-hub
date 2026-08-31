@@ -1373,7 +1373,18 @@ async fn linktap_poll_loop(rt: Shared) {
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(LINKTAP_POLL_SECS)).await;
+        // A washdown about to hand over needs a poll INSIDE its lead window, and that window is
+        // narrower than the standing cadence — so ask the runtime whether anything is time-critical
+        // before sleeping the full minute. Nothing pending ⇒ the normal interval, unchanged.
+        let nap = {
+            let guard = rt.linktap.lock().await;
+            guard
+                .as_ref()
+                .and_then(|r| r.poll_hint(now_ms()))
+                .map(|h| h.min(Duration::from_secs(LINKTAP_POLL_SECS)))
+                .unwrap_or(Duration::from_secs(LINKTAP_POLL_SECS))
+        };
+        tokio::time::sleep(nap).await;
     }
 }
 
