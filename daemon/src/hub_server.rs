@@ -570,29 +570,40 @@ fn is_loopback(addr: SocketAddr) -> bool {
 /// Refuse unless this is a first run, from this machine. Returns the reason when it refuses, so a
 /// misconfigured setup says which of the two rules stopped it.
 async fn first_run_only(rt: &Rt, addr: SocketAddr) -> Option<Answer> {
-    // Loopback, or a device on one of this hub's own /24s within the claim window. See adopt.rs
-    // for why the loopback-only rule had to go (it required a desktop app ON the hub machine,
-    // which a headless Pi, a NAS or a container cannot have) and for the three bounds that make
-    // the LAN door acceptable.
-    if let Err(refusal) = crate::adopt::may_set_up(addr.ip(), &crate::linktap_discover::local_ipv4s(), rt.started.elapsed(), crate::adopt::ADOPTION_WINDOW) {
-        // LOG THE ATTEMPT WITH THE PEER. A hub that gets claimed on a shared marina network must be
-        // able to say by whom, and a hub that keeps refusing an owner who is one subnet away must
-        // be able to say that too — neither is answerable from the 403 alone.
-        crate::hlog!("setup: refused {} from {} ({:?})", addr.ip(), refusal.message(), refusal);
-        return Some(err(403, refusal.message()));
-    }
-    if !is_loopback(addr) {
-        crate::hlog!("setup: LAN setup call from {} accepted (claim window open)", addr.ip());
-    }
-    // A DAMAGED config reads back as defaults, which look exactly like a first run — so without
-    // this check the app would be invited to sign a hub whose real identity is still on disk, and
-    // the write would be refused half way through setup with a confusing 500. Say the true reason.
+    // ⚠️ ORDER MATTERS, AND THE FIRST VERSION OF THIS GOT IT WRONG. The checks below run
+    // PERMANENT-STATE FIRST, CALLER-STATE SECOND, because the two answer different questions:
+    //
+    //   * "is this hub claimable AT ALL?"  — a property of the hub, true or false from everywhere.
+    //   * "may THIS caller claim it?"      — a property of the peer and the clock.
+    //
+    // Asking the caller question first made a SIGNED hub answer a LAN peer with
+    // "this hub's setup window has closed - restart the hub service to open it again", which is
+    // both wrong and dangerous advice: it invites someone to restart the service of a hub that is
+    // already claimed, on the promise of a claim window that will never apply to them. Found by
+    // testing the endpoint on CENTRAL rather than by reading the code.
     if let Some(why) = hub_config::config_damage_in(&rt.base) {
+        // A damaged config reads back as defaults, which look exactly like a first run — so without
+        // this the app would be invited to sign a hub whose real identity is still on disk, and the
+        // write would be refused half way through setup with a confusing 500.
         return Some(err(409, &format!("this hub's configuration is damaged and must be repaired or removed first: {why}")));
     }
     let cfg = hub_config::read_config_in(&rt.base);
     if !cfg.vid.is_empty() || !cfg.token.is_empty() {
         return Some(err(409, "this hub is already set up; rotate its credential instead"));
+    }
+    // Only now does WHERE the caller is matter. Loopback, or a device on one of this hub's own /24s
+    // within the claim window — see adopt.rs for why the loopback-only rule had to go and for the
+    // three bounds that make the LAN door acceptable.
+    if let Err(refusal) = crate::adopt::may_set_up(addr.ip(), &crate::linktap_discover::local_ipv4s(), rt.started.elapsed(), crate::adopt::ADOPTION_WINDOW) {
+        // LOG THE ATTEMPT WITH THE PEER. A hub that gets claimed on a shared marina network must be
+        // able to say by whom, and a hub that keeps refusing an owner who is one subnet away must
+        // be able to say that too — neither is answerable from the 403 alone. Now that this runs
+        // last it fires only for genuinely UNCLAIMED hubs, so it is signal rather than noise.
+        crate::hlog!("setup: refused {} from {} ({:?})", addr.ip(), refusal.message(), refusal);
+        return Some(err(403, refusal.message()));
+    }
+    if !is_loopback(addr) {
+        crate::hlog!("setup: LAN setup call from {} accepted (claim window open)", addr.ip());
     }
     None
 }
