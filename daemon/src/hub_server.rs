@@ -1210,10 +1210,21 @@ async fn key_sync_loop(rt: Shared) {
 /// missed push cannot strand stale state.
 const LINKTAP_POLL_SECS: u64 = 60;
 
-/// Longest a `/api/hub/linktap/state` call may be held open. Kept UNDER the relay's own timeout
-/// (hubRelay.ts RELAY_TIMEOUT_MS, 15s) so the identical call works off-LAN through the worker
-/// instead of being killed in transit.
-const MAX_STATE_WAIT_SECS: u64 = 10;
+/// Longest a `/api/hub/linktap/state` call may be held open.
+///
+/// 🔴 SIXTY, NOT TEN, AND THE REASON MATTERS. This was 10s to survive the worker relay's own 15s
+/// timeout, so the identical call could serve an off-LAN browser. Owner ruling 2026-08-31 keeps the
+/// web app CLOUD-ONLY, which takes the relay out of this path entirely — and with it the only
+/// reason to hold requests briefly.
+///
+/// A held request costs a socket and nothing else; a request that RETURNS costs a wake-up, a
+/// handshake and a round trip. So a short cap is not the cautious choice, it is the expensive one:
+/// at 10s an idle valve cost 360 round trips an hour, at 60s it costs 60. Owner, on the app polling
+/// the gateway every 5s: *"i don't want to kill a phone's battery."*
+///
+/// Sixty rather than longer because that is where middleboxes and OS socket timeouts start reaping
+/// idle connections; past it the reconnect churn comes back for nothing.
+const MAX_STATE_WAIT_SECS: u64 = 60;
 
 /// Rebuild the machine when the configured gateway/valves change, and keep the paid gate current.
 /// Returns false when LinkTap is not configured or not permitted, in which case nothing polls.
@@ -2382,11 +2393,14 @@ mod tests {
     }
 
     #[test]
-    fn the_state_wait_stays_under_the_relays_timeout() {
-        // The same call has to survive the worker's relay hop (hubRelay.ts RELAY_TIMEOUT_MS = 15s).
-        // A cap at or above that would have the relay kill the request the hub is deliberately
-        // holding, turning a working long poll into a timeout on every call.
-        assert!(MAX_STATE_WAIT_SECS < 15, "must stay under RELAY_TIMEOUT_MS");
+    fn the_state_wait_is_long_enough_to_be_worth_holding() {
+        // The cap IS the battery budget: an idle valve costs one round trip per cap-length. At the
+        // old relay-driven 10s that was 360 wake-ups an hour on a phone; a minute makes it 60.
+        // Held sockets are cheap, returning requests are not.
+        assert!(MAX_STATE_WAIT_SECS >= 60, "a short cap is the expensive choice, not the safe one");
+        // But not so long that middleboxes and OS socket reapers start dropping idle connections,
+        // which would bring the reconnect churn back for nothing.
+        assert!(MAX_STATE_WAIT_SECS <= 90);
     }
 
     #[tokio::test]
