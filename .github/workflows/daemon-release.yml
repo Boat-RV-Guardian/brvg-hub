@@ -86,6 +86,18 @@ jobs:
           # The notification-area monitor rides in the installer rather than shipping as its own
           # download: on its own it is useless, since it exists to watch a hub.
           cp target/release/brvg-hub-tray.exe brvg-hub-tray-windows-x64.exe
+          # ASSERT the tray is a GUI-subsystem PE. A console-subsystem tray pops a terminal window
+          # at every sign-in (the Run key launches it) — the exact bug #![windows_subsystem] fixes.
+          # An architecture check would not catch this, same lesson as the ARM 'statically linked'
+          # assertion: read the PE Subsystem field (2 = GUI, 3 = console) and fail the release loudly
+          # if it ever regresses to console.
+          pwsh -Command '
+            $b = [IO.File]::ReadAllBytes("brvg-hub-tray-windows-x64.exe");
+            $pe = [BitConverter]::ToInt32($b, 0x3C);
+            $sub = [BitConverter]::ToUInt16($b, $pe + 0x5C);
+            if ($sub -ne 2) { Write-Error "tray PE Subsystem is $sub, not 2 (GUI) - it will pop a console window"; exit 1 }
+            Write-Host "tray is a GUI-subsystem binary (no console window)"
+          '
 
       - name: Build (Linux, native x64)
         if: runner.os == 'Linux' && matrix.target == ''
