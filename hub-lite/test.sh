@@ -813,3 +813,24 @@ lt_load_state "$_lsdir/nope" 86400 378
 check "load: no file means idle" "idle" "$_state"
 check "load: and nothing leaks in from the previous valve" "normal 86400 378 0 " "$_mode $_dur_eff $_cap_eff $_started $_stop"
 rm -rf "$_lsdir"
+
+# --- feed-setup: the signed-feed provisioner --------------------------------------------------
+# feed-setup.sh writes an absolute /etc/opkg tree, so run it against a sandbox root by rewriting
+# that prefix. What matters: the trust anchor lands under the fingerprint opkg looks up, the
+# customfeeds line is present exactly once however many times it runs, and an unrelated feed line
+# already in the file survives.
+_fsroot=$(mktemp -d)
+sed "s#/etc/opkg#$_fsroot/etc/opkg#g" hub-lite/package/feed-setup.sh > "$_fsroot/fs.sh"
+sh "$_fsroot/fs.sh" >/dev/null 2>&1
+sh "$_fsroot/fs.sh" >/dev/null 2>&1   # twice — the interesting case is idempotency
+printf 'src/gz openwrt_core https://downloads.openwrt.org/x\n' >> "$_fsroot/etc/opkg/customfeeds.conf"
+sh "$_fsroot/fs.sh" >/dev/null 2>&1
+check "feed-setup: exactly one brvg feed line after three runs" "1" "$(grep -c 'brvg_hublite' "$_fsroot/etc/opkg/customfeeds.conf")"
+check "feed-setup: an unrelated feed line is preserved" "1" "$(grep -c 'openwrt_core' "$_fsroot/etc/opkg/customfeeds.conf")"
+check "feed-setup: the trust anchor is named by the committed key's fingerprint" "yes" "$([ -f "$_fsroot/etc/opkg/keys/b0ff2bec314c57d3" ] && echo yes || echo no)"
+check "feed-setup: the installed key is byte-identical to the committed public key" "same" "$(cmp -s "$_fsroot/etc/opkg/keys/b0ff2bec314c57d3" hub-lite/package/brvg-feed.pub && echo same || echo differ)"
+# The fingerprint in feed-setup.sh MUST match the committed key — a mismatch means opkg looks up a
+# key file that verification will never find. Recompute it from the key blob the way usign does is
+# out of scope for a pure-shell test, so assert the two constants agree with each other instead.
+check "feed-setup: its fingerprint constant matches the key filename it writes" "b0ff2bec314c57d3" "$(sed -n 's/^KEY_FINGERPRINT="\([^"]*\)".*/\1/p' hub-lite/package/feed-setup.sh)"
+rm -rf "$_fsroot"

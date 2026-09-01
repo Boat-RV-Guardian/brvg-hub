@@ -1,0 +1,125 @@
+# Publish the SIGNED opkg feed that a router's `self_update` upgrades from.
+#
+# THE SPLIT THAT MAKES THIS SAFE (mirrors brvg-cloud-server/src/agentRollout.ts): the cloud decides
+# WHO updates and WHEN via the `self_update` command; THIS feed decides WHAT. opkg on the router
+# verifies every `Packages` index against the usign public key baked into the installer
+# (hub-lite/package/brvg-feed.pub, fingerprint b0ff2bec314c57d3) before it installs a byte. So a
+# compromise of this workflow changes the timing of a signed install, never its contents — provided
+# the SECRET key stays a repo secret and nothing here ever logs it.
+#
+# WHERE IT PUBLISHES. A single ROLLING release tagged `hub-lite-feed`, marked NOT latest, so it
+# never touches the `latest` link the daemon's own release claims (daemon-release.yml). Routers
+# point opkg at releases/download/hub-lite-feed/ — a stable URL whose Packages.gz/Packages.sig this
+# workflow overwrites each release. See hub-lite/package/feed-setup.sh for the router side.
+name: Publish hub-lite feed
+
+on:
+  push:
+    tags: ['hub-lite-v*']
+  # BUILD WITHOUT PUBLISHING — the same rehearsal valve as daemon-release.yml. A dispatched run
+  # builds and SIGNS the feed and uploads it as an artifact, but creates no release and moves no
+  # tag, so the live feed cannot change from a test build. Needs the signing secret to be present
+  # to exercise the signature; without it the run still builds an unsigned feed and says so.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  feed:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # On a TAG the version must equal the hub-lite's own — two sources of truth would mean the
+      # feed advertising a version the shipped script does not report. Same guard as the daemon.
+      - name: Resolve the version (and on a tag, refuse to disagree with the hub-lite)
+        id: ver
+        run: |
+          SCRIPT_VER=$(sed -n 's/^HUB_LITE_VERSION="\([^"]*\)".*/\1/p' hub-lite/brvg-hub-lite.sh)
+          [ -n "$SCRIPT_VER" ] || { echo "::error::could not read HUB_LITE_VERSION"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG_VER="${GITHUB_REF_NAME#hub-lite-v}"
+            [ "$TAG_VER" = "$SCRIPT_VER" ] || {
+              echo "::error::tag says $TAG_VER but the hub-lite reports $SCRIPT_VER — a feed must not lie about its version"; exit 1
+            }
+          fi
+          echo "ver=$SCRIPT_VER" >> "$GITHUB_OUTPUT"
+
+      # usign, built from source with a plain compiler — no libubox (USE_LIBUBOX is off by default),
+      # no cmake, one `cc` invocation. This is the SAME tool the router verifies with, so signing
+      # and verifying can never disagree about a key or signature format. The upstream is a tiny,
+      # essentially frozen utility; the build asserts the binary works before it is trusted to sign.
+      - name: Build usign (the signer + the router's own verifier)
+        run: |
+          git clone --depth 1 https://git.openwrt.org/project/usign.git usign-src
+          cc -O2 -o /usr/local/bin/usign \
+            usign-src/main.c usign-src/base64.c usign-src/ed25519.c \
+            usign-src/edsign.c usign-src/f25519.c usign-src/fprime.c usign-src/sha512.c
+          usign 2>&1 | grep -q 'verify' || { echo "::error::usign did not build usably"; exit 1; }
+
+      - name: Build the package
+        run: sh hub-lite/package/build-ipk.sh
+
+      # Sign the feed with the SECRET key from repo secrets, and PROVE it verifies against the
+      # committed public key before anything leaves this job — a signature nobody checked is a
+      # signature that isn't there. build-feed.sh does both when USIGN_KEY (+ USIGN_PUB) are set.
+      - name: Sign the feed (and self-verify as a router would)
+        env:
+          HUB_LITE_USIGN_KEY: ${{ secrets.HUB_LITE_USIGN_KEY }}
+        run: |
+          if [ -z "$HUB_LITE_USIGN_KEY" ]; then
+            if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+              echo "::error::HUB_LITE_USIGN_KEY secret is not set — cannot sign a published feed"; exit 1
+            fi
+            echo "::warning::no signing key — building an UNSIGNED feed for this dispatch rehearsal"
+            ALLOW_UNSIGNED=1 sh hub-lite/package/build-feed.sh
+          else
+            printf '%s' "$HUB_LITE_USIGN_KEY" > "$RUNNER_TEMP/feed.sec"
+            chmod 600 "$RUNNER_TEMP/feed.sec"
+            USIGN_KEY="$RUNNER_TEMP/feed.sec" USIGN_PUB="hub-lite/package/brvg-feed.pub" \
+              sh hub-lite/package/build-feed.sh
+            rm -f "$RUNNER_TEMP/feed.sec"
+            # Independent belt-and-suspenders: verify with usign directly, exactly as opkg will.
+            usign -V -m dist/Packages -p hub-lite/package/brvg-feed.pub -x dist/Packages.sig
+            echo "router-side usign -V: OK"
+          fi
+
+      - name: Stage the feed assets
+        id: stage
+        run: |
+          mkdir -p feed
+          cp dist/Packages dist/Packages.gz dist/*.ipk feed/
+          [ -f dist/Packages.sig ] && cp dist/Packages.sig feed/
+          cp hub-lite/package/brvg-feed.pub feed/
+          ls -l feed/
+          echo "ipk=$(basename dist/*.ipk)" >> "$GITHUB_OUTPUT"
+
+      # DISPATCH: upload for inspection, publish nothing.
+      - name: Upload the feed for testing (dispatch only — publishes nothing)
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-lite-feed-${{ steps.ver.outputs.ver }}
+          path: feed/*
+          if-no-files-found: error
+
+      # TAG: overwrite the rolling `hub-lite-feed` release. --latest=false so it never hijacks the
+      # daemon's stable install link. Create the release on first run; --clobber replaces assets
+      # after that, so the stable feed URL always serves the newest signed index.
+      - name: Publish to the rolling feed release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view hub-lite-feed --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create hub-lite-feed \
+              --repo "$GITHUB_REPOSITORY" --latest=false \
+              --title "hub-lite signed feed" \
+              --notes "Rolling opkg feed for the hub-lite. Routers upgrade from here on self_update; opkg verifies every index against brvg-feed.pub (fingerprint b0ff2bec314c57d3). Do not delete."
+          fi
+          gh release upload hub-lite-feed feed/* --repo "$GITHUB_REPOSITORY" --clobber
+          echo "published ${{ steps.ver.outputs.ver }} → releases/download/hub-lite-feed/"

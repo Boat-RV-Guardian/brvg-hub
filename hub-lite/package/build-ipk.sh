@@ -8,8 +8,9 @@
 # are signed (usign), so the signature check happens on-device, by the package manager, rather than
 # being something we invent.
 #
-# This script produces the package. PUBLISHING it (an opkg feed on R2 + the router pointed at it)
-# is owner infrastructure and is NOT done here — see hub-lite/package/README.md.
+# This script produces the package. SIGNING and PUBLISHING it — the signed opkg feed a router's
+# self_update pulls from — is done by .github/workflows/hub-lite-feed.yml on a hub-lite-v* tag; see
+# hub-lite/package/README.md for the feed URL and the one owner step (the signing secret).
 #
 # ipk format: an ar archive of debian-binary + control.tar.gz + data.tar.gz. No OpenWrt SDK, no
 # cross-compiler: the hub-lite is POSIX shell, so the "build" is packaging.
@@ -29,9 +30,13 @@ trap 'rm -rf "$WORK"' EXIT
 PKG="brvg-hub-lite"
 ARCH="all"                 # pure shell — architecture-independent
 
-mkdir -p "$WORK/data/usr/bin" "$WORK/data/etc/init.d" "$WORK/data/www/brvg/cgi-bin" "$WORK/data/www/brvg/api" "$WORK/control" "$OUT"
+mkdir -p "$WORK/data/usr/bin" "$WORK/data/usr/libexec/brvg-hub-lite" "$WORK/data/etc/init.d" "$WORK/data/www/brvg/cgi-bin" "$WORK/data/www/brvg/api" "$WORK/control" "$OUT"
 
 install -m 0755 "$SRC/brvg-hub-lite.sh" "$WORK/data/usr/bin/brvg-hub-lite"
+# The signed-feed provisioner: writes the trust anchor and the customfeeds line self_update needs.
+# Shipped as a payload file (not just baked into postinst) so a re-run — or the app's over-SSH
+# installer, which embeds the same content — has one canonical script to call.
+install -m 0755 "$SRC/package/feed-setup.sh" "$WORK/data/usr/libexec/brvg-hub-lite/feed-setup"
 install -m 0755 "$SRC/openwrt/etc/init.d/brvg-hub-lite" "$WORK/data/etc/init.d/brvg-hub-lite"
 # USB GPS → TCP NMEA setup. SHIPPED but not run at install: the dongle is normally plugged in later,
 # and it needs working internet for opkg. `brvg-setup-usb-gps` on the router does the whole job.
@@ -68,6 +73,11 @@ cat > "$WORK/control/postinst" <<'EOF'
 #!/bin/sh
 [ -f /etc/brvg-hub-lite.conf ] && chmod 600 /etc/brvg-hub-lite.conf
 /etc/init.d/brvg-hub-lite enable 2>/dev/null || true
+# Point opkg at the signed feed so the NEXT self_update has somewhere to pull from. Best-effort:
+# feed-setup runs `set -e`, but a router with a read-only or unusual /etc must still finish
+# installing the hub-lite, so a failure here is logged and swallowed rather than failing the
+# package.
+[ -x /usr/libexec/brvg-hub-lite/feed-setup ] && { /usr/libexec/brvg-hub-lite/feed-setup || echo "BRVG_FEED_SETUP_SKIPPED"; }
 # Deliberately NOT started here: without a config it would loop on a fatal error. The app starts it
 # after writing the configuration.
 exit 0
@@ -91,6 +101,7 @@ echo "2.0" > "$WORK/debian-binary"
 # leaves the router with no hub-lite, which is the failure mode worth catching here rather than on
 # somebody's boat.
 tar tzf "$WORK/data.tar.gz" | grep -q './usr/bin/brvg-hub-lite' || { echo "payload missing the hub-lite" >&2; exit 1; }
+tar tzf "$WORK/data.tar.gz" | grep -q './usr/libexec/brvg-hub-lite/feed-setup' || { echo "payload missing the feed provisioner" >&2; exit 1; }
 tar tzf "$WORK/data.tar.gz" | grep -q './etc/init.d/brvg-hub-lite' || { echo "payload missing the init script" >&2; exit 1; }
 tar tzf "$WORK/data.tar.gz" | grep -q './www/brvg/cgi-bin/report' || { echo "payload missing the relay CGI" >&2; exit 1; }
 tar tzf "$WORK/data.tar.gz" | grep -q './www/brvg/cgi-bin/mgmt' || { echo "payload missing the management CGI" >&2; exit 1; }
