@@ -11,6 +11,7 @@
 //! Both funnel into ONE `observe()` — the machine cannot tell them apart, which is the point.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::cycle::{self, Action, EndReason, Ledger, Profile, State};
 use crate::linktap::{self, Gateway, VolUnit};
@@ -26,6 +27,14 @@ pub struct Track {
     /// A reopen this valve is owed, decided in `observe` and PERFORMED by the caller — the same
     /// split `Action::Stop` already uses, so all gateway I/O stays in one place.
     pending_open: Option<PendingOpen>,
+    /// The params of the last `linktap.measurement` this valve produced.
+    ///
+    /// 🔴 THE APP READS THIS, NOT THE GATEWAY. Owner ruling 2026-08-31: *"The app should not be
+    /// talking to the linktap gateway at all, it should only be talking to a hub... except during
+    /// provisioning."* Keeping the MEASUREMENT rather than a private shape means the app on the LAN
+    /// and the app off it are looking at the same fields, mapped the same way — the LAN path stops
+    /// being a second source of truth with its own bugs.
+    last_measurement: Option<Vec<(String, String)>>,
 }
 
 /// A reopen the hub owes a valve: auto-restart of a Normal Run, or the Normal Run a washdown was
@@ -68,7 +77,7 @@ impl Runtime {
         for id in dev_ids {
             let id = linktap::normalize_dev_id(id);
             if !id.is_empty() {
-                tracks.insert(id, Track { state: State::Idle, ledger: None, profile: None, meters: None, pending_open: None });
+                tracks.insert(id, Track { state: State::Idle, ledger: None, profile: None, meters: None, pending_open: None, last_measurement: None });
             }
         }
         Runtime { gateway, unit: VolUnit::Gal, default_profile, tracks }
@@ -123,6 +132,50 @@ impl Runtime {
             // against a future caller rather than a path we expect to take.
             None => Err(format!("valve {id} is not watched by this hub")),
         }
+    }
+
+    /// How long the poll loop may sleep before it MUST look again.
+    ///
+    /// A washdown that is about to hand over needs a poll inside its lead window, and the standing
+    /// cadence (60s) is wider than the window — so a plain fixed interval could step straight over
+    /// it and drop us back on the slow close-then-reopen path the handover exists to avoid.
+    /// Returns `None` when nothing is time-critical, and the caller keeps its normal cadence.
+    pub fn poll_hint(&self, now_ms: i64) -> Option<Duration> {
+        let mut soonest: Option<u64> = None;
+        for (id, track) in &self.tracks {
+            let State::Running(run) = &track.state else { continue };
+            if run.handover_issued || run.stop_issued.is_some() { continue; }
+            if run.mode != cycle::Mode::Washdown || !run.resume_normal { continue; }
+            if run.provenance != cycle::Provenance::Hub { continue; }
+            let _ = id;
+            let elapsed = ((now_ms - run.started_at) / 1000).max(0) as u64;
+            let left = run.duration_secs.saturating_sub(elapsed);
+            // Aim to be looking a little before the lead window opens, so the first poll inside it
+            // is early rather than exactly on the boundary.
+            let until = left.saturating_sub(cycle::HANDOVER_LEAD_SECS);
+            soonest = Some(soonest.map_or(until, |s: u64| s.min(until)));
+        }
+        // Floor at 5s: a valve seconds from handover must not spin the gateway.
+        soonest.map(|s| Duration::from_secs(s.max(5)))
+    }
+
+    /// The last measurement this valve produced, as (key, value) pairs — the SAME params the cloud
+    /// receives. `None` before the first observation.
+    pub fn last_measurement(&self, dev_id: &str) -> Option<&Vec<(String, String)>> {
+        self.tracks.get(&linktap::normalize_dev_id(dev_id))?.last_measurement.as_ref()
+    }
+
+    /// Every valve this hub watches that has produced a measurement, for a whole-hub read.
+    pub fn measurements(&self) -> Vec<(String, Vec<(String, String)>)> {
+        let mut out: Vec<(String, Vec<(String, String)>)> = self
+            .tracks
+            .iter()
+            .filter_map(|(id, t)| t.last_measurement.as_ref().map(|m| (id.clone(), m.clone())))
+            .collect();
+        // Stable order: a map iteration order that shuffles between reads would make the response
+        // look changed when nothing did.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// Take the reopen this valve is owed, if any. Taking CLEARS it, so a caller that fails to
@@ -183,6 +236,25 @@ impl Runtime {
         let r = cycle::step(&track.state, obs, &profile);
         track.state = r.state;
 
+        // 🔴 THE SEAMLESS HANDOVER, decided while the valve is STILL OPEN. Owner, MVP 2026-08-31:
+        // "it did resume, but it took forever... would be nice if it reprogrammed it right before
+        // it was going to stop, so it never stops the water flow during the changing of the plans."
+        //
+        // The resume-after-close path below cannot be quick — we learn a cycle ended by polling,
+        // and the poll is a minute apart. Measured: 30 seconds of dry pipe. So we do not wait for
+        // the close; we reprogram the valve into its Normal Run just before its timer expires, and
+        // it never shuts. `handover_issued` makes it exactly once.
+        if let State::Running(run) = &mut track.state {
+            if cycle::should_hand_over(run, remain, now_ms, cycle::HANDOVER_LEAD_SECS) {
+                run.handover_issued = true;
+                track.pending_open = Some(PendingOpen {
+                    duration_secs: profile.duration_secs,
+                    volume_cap_l: profile.volume_cap_l,
+                    why: "washdown handover",
+                });
+            }
+        }
+
         let mut reports = Vec::new();
         if let Some(ended) = &r.ended {
             let ledger = cycle::apply_to_ledger(track.ledger.as_ref(), ended);
@@ -226,6 +298,31 @@ impl Runtime {
             ("vol_l".into(), format!("{volume_l:.2}")),
             ("meters".into(), if meters { "1".to_string() } else { "0".to_string() }),
         ];
+        // THE VALVE'S OWN HEALTH, carried on the measurement so the app never needs the gateway.
+        //
+        // 🔴 Owner ruling 2026-08-31: "The app should not be talking to the linktap gateway at all,
+        // it should only be talking to a hub." The app's valve view shows battery, RF signal and
+        // link state, and it read all three straight off its own cmd-3 poll. Without them here the
+        // app cannot stop polling — it would have to keep a second reader alive for three fields.
+        // The hub already HAS them: they arrive in the same payload it is parsing.
+        if let Some(b) = data.get("battery").and_then(|v| v.as_f64()) {
+            params.push(("battery".into(), format!("{}", b.round() as i64)));
+        }
+        if let Some(sig) = data.get("signal").and_then(|v| v.as_f64()) {
+            params.push(("signal".into(), format!("{}", sig.round() as i64)));
+        }
+        if let Some(rf) = data.get("is_rf_linked").map(linktap::coerce_watering) {
+            params.push(("rf".into(), if rf { "1".into() } else { "0".to_string() }));
+        }
+        // ⚠️ THE VALVE'S FAULT FLAGS, and they are the reason this list is not "nice to have".
+        // The app raises broken / leak / clog from these, and it read them off its own gateway poll.
+        // Moving the app onto the hub without carrying them would have quietly deleted valve fault
+        // detection while every screen still looked right — the worst shape a regression can take.
+        for (src, out) in [("is_broken", "broken"), ("is_leak", "leak"), ("is_clog", "clog"), ("is_cutoff", "cutoff")] {
+            if let Some(v) = data.get(src).map(linktap::coerce_watering) {
+                params.push((out.into(), if v { "1".into() } else { "0".to_string() }));
+            }
+        }
         // THE LIVE FLOW RATE, in LITRES PER MINUTE. `speed_lpm` has always been computed here —
         // it drives the cutoff's stop-latency lead (cycle::cutoff_trigger_l) — but it was never
         // reported, so an app that is OFF the LAN (relay or cloud) had volume with no rate and
@@ -282,6 +379,10 @@ impl Runtime {
             }));
         }
 
+        // Kept for the LAN read path as well as spooled to the cloud — one shape, one truth.
+        if let Some(t) = self.tracks.get_mut(&id) {
+            t.last_measurement = Some(params.clone());
+        }
         reports.push(Report { device: format!("lt_{id}"), event: "linktap.measurement".into(), params });
 
         if first_time_not_metering {
@@ -721,6 +822,104 @@ mod tests {
         assert_eq!(b[0].0, DEV, "long ids normalise to the canonical 16");
         assert!(parse_gateway_push("not json").is_empty());
         assert!(parse_gateway_push("{}").is_empty());
+    }
+
+    #[test]
+    fn the_measurement_carries_everything_the_app_reads_off_the_gateway() {
+        // 🔴 THE CONTRACT THAT LETS THE APP STOP POLLING. Owner ruling 2026-08-31: "The app should
+        // not be talking to the linktap gateway at all." The app's valve view shows battery, RF
+        // signal and link state, and read all three off its OWN cmd-3 poll. If the hub does not
+        // carry them, the app cannot stop — it would keep a second reader alive for three fields.
+        let mut r = rt(VolUnit::Litre);
+        let (_, reports) = r.observe(
+            DEV,
+            &json!({"is_watering":1,"vol":3.2,"speed":5.5,"battery":93,"signal":69,"is_rf_linked":true}),
+            T0,
+        );
+        let m = reports.iter().find(|x| x.event == "linktap.measurement").expect("a measurement");
+        let p = |k: &str| m.params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(p("battery"), Some("93".into()));
+        assert_eq!(p("signal"), Some("69".into()));
+        assert_eq!(p("rf"), Some("1".into()));
+
+        // The fault flags the app raises alarms from.
+        let (_, faults) = r.observe(
+            DEV,
+            &json!({"is_watering":0,"is_broken":true,"is_leak":false,"is_clog":true,"is_cutoff":false}),
+            T0 + 1000,
+        );
+        let mf = faults.iter().find(|x| x.event == "linktap.measurement").unwrap();
+        let pf = |k: &str| mf.params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(pf("broken"), Some("1".into()));
+        assert_eq!(pf("leak"), Some("0".into()));
+        assert_eq!(pf("clog"), Some("1".into()));
+        assert_eq!(pf("cutoff"), Some("0".into()));
+
+        // A gateway that omits them must not invent zeros — a missing reading is not a flat battery.
+        let mut r2 = rt(VolUnit::Litre);
+        let (_, reports2) = r2.observe(DEV, &json!({"is_watering":0}), T0);
+        let m2 = reports2.iter().find(|x| x.event == "linktap.measurement").unwrap();
+        for k in ["battery", "signal", "rf"] {
+            assert!(m2.params.iter().all(|(a, _)| a != k), "{k} must be absent, not zero");
+        }
+    }
+
+    #[test]
+    fn a_washdown_hands_over_before_it_expires_so_the_water_never_stops() {
+        // 🔴 OWNER, MVP 2026-08-31: "it did resume, but it took forever... would be nice if it
+        // reprogrammed it right before it was going to stop, so it never stops the water flow
+        // during the changing of the plans."
+        //
+        // Measured on the boat: closed 14:57:04, watering again 14:57:34 — 30s of dry pipe, because
+        // the hub only learns a cycle ended by polling and the poll is 60s apart. The handover
+        // reprograms the OPEN valve instead, so it never shuts.
+        let mut r = rt(VolUnit::Litre);
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, true).expect("our valve");
+
+        r.observe(DEV, &json!({"is_watering":1,"vol":1.0,"remain_duration":200}), T0 + 100_000);
+        assert!(r.take_pending_open(DEV).is_none(), "200s left is not the time to hand over");
+
+        // Inside the lead window, valve STILL OPEN.
+        r.observe(DEV, &json!({"is_watering":1,"vol":8.0,"remain_duration":15}), T0 + 285_000);
+        let open = r.take_pending_open(DEV).expect("a handover");
+        assert_eq!(open.why, "washdown handover");
+        assert_eq!(open.duration_secs, 24 * 3600, "the valve's Normal Run profile");
+        assert!((open.volume_cap_l - 100.0).abs() < 0.01);
+
+        // Exactly once — a second poll inside the window must not re-issue.
+        r.observe(DEV, &json!({"is_watering":1,"vol":8.5,"remain_duration":8}), T0 + 292_000);
+        assert!(r.take_pending_open(DEV).is_none(), "handover is issued once");
+    }
+
+    #[test]
+    fn a_washdown_being_stopped_never_hands_over() {
+        // The dangerous case: a flood closes the valve inside the lead window. Handing over there
+        // would reopen the water on a vessel that is flooding.
+        let mut r = rt(VolUnit::Litre);
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, true).expect("our valve");
+        r.observe(DEV, &json!({"is_watering":1,"vol":1.0,"remain_duration":200}), T0 + 100_000);
+        r.note_stop(DEV, EndReason::FloodShutoff);
+        r.observe(DEV, &json!({"is_watering":1,"vol":8.0,"remain_duration":15}), T0 + 285_000);
+        assert!(r.take_pending_open(DEV).is_none(), "a valve on its way shut must stay shut");
+    }
+
+    #[test]
+    fn the_poll_loop_is_told_to_look_again_before_a_handover_window() {
+        let mut r = rt(VolUnit::Litre);
+        assert!(r.poll_hint(T0).is_none(), "an idle valve asks for nothing");
+
+        r.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, true).expect("our valve");
+        // 300s run, 100s elapsed, 200s left, 20s lead -> look again in ~180s (the caller still caps
+        // this at its own 60s cadence).
+        assert_eq!(r.poll_hint(T0 + 100_000).expect("a washdown that will hand over").as_secs(), 180);
+
+        // Never busier than every 5s, however close the handover is.
+        assert_eq!(r.poll_hint(T0 + 299_000).expect("seconds from handover").as_secs(), 5);
+
+        // A washdown with no resume asked for is not time-critical.
+        let mut plain = rt(VolUnit::Litre);
+        plain.note_hub_open(DEV, T0, cycle::Mode::Washdown, 300, 0.0, false).unwrap();
+        assert!(plain.poll_hint(T0 + 100_000).is_none());
     }
 
     #[test]
