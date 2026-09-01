@@ -697,3 +697,53 @@ write_state "modem.measurement" "up=1&av=9.9.9&rsrp=-107"
 check "write_state: exactly one av in the object" "1" "$(tr ',' '\n' < "$HUB_LITE_STATE" | grep -c '"av"')"
 check "write_state: and it is the header's version, not the param's" "1" "$(grep -c "\"av\":\"$HUB_LITE_VERSION\"" "$HUB_LITE_STATE")"
 rm -rf "$_SD2"
+
+# ── The /api/hub/* door (owner ruling 2026-08-31: "move to 8722, keep one contract") ────────────
+#
+# A hub-lite now answers the SAME paths as the Rust daemon, so the app has one hub client rather
+# than a second ?action= dialect. These pin the contract, because a shape mismatch here is not a
+# hub-lite bug — it is the app silently treating a live hub as absent.
+_api() {  # $1 = PATH_INFO, $2 = conf file (optional)
+  PATH_INFO="$1" BRVG_HUB_LITE_CONF="${2:-/nonexistent-conf}" BRVG_HUB_LITE_BIN=/nonexistent-bin \
+    BRVG_LT_STATE_DIR="$_apidir" sh "$(dirname "$0")/hub-lite-api.sh" 2>/dev/null
+}
+_apidir=$(mktemp -d 2>/dev/null || echo /tmp/brvg-api-test.$$)
+mkdir -p "$_apidir"
+_apiconf="$_apidir/conf"
+cat > "$_apiconf" <<'CONF'
+VEHICLE_ID=v_test
+VEHICLE_KEY=k
+LINKTAP_HOST=192.168.8.50
+LINKTAP_GW_ID=GW02
+LINKTAP_DEV_IDS=aaaabbbbccccdddd
+CONF
+
+out=$(_api /ping | grep -c '"ok":true')
+check "api: ping answers ok without a config or a key" "1" "$out"
+
+out=$(_api /ping | grep -c '"lite":true')
+check "api: ping ADMITS it is a lite hub — a client must not assume full capability" "1" "$out"
+
+out=$(_api /status "$_apiconf" | grep -c '"capabilities":\["linktap"\]')
+check "api: status advertises linktap when a gateway is configured" "1" "$out"
+
+out=$(_api /status | grep -c '"capabilities":\[\]')
+check "api: and advertises NOTHING when no gateway is configured" "1" "$out"
+
+out=$(_api /linktap/state "$_apiconf" | grep -c '"devId":"aaaabbbbccccdddd"')
+check "api: linktap/state names the configured valve" "1" "$out"
+
+# Field names must match the daemon's measurement, or mapHubValveReading needs a special case.
+out=$(_api /linktap/state "$_apiconf" | grep -c '"watering":"0"')
+check "api: a valve with no state file reads CLOSED, never absent" "1" "$out"
+
+printf 'state=watering volL=12.5 remain=600\n' > "$_apidir/brvg-lt-aaaabbbbccccdddd.state"
+out=$(_api /linktap/state "$_apiconf" | grep -c '"watering":"1"')
+check "api: a watering valve is reported watering" "1" "$out"
+out=$(_api /linktap/state "$_apiconf" | grep -c '"vol_l":"12.5"')
+check "api: volume uses the daemon's field name and litres" "1" "$out"
+
+out=$(_api /nope | grep -c '"error"')
+check "api: an unknown verb is a 404 shape, not a silent 200" "1" "$out"
+
+rm -rf "$_apidir"
