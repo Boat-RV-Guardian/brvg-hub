@@ -247,6 +247,7 @@ pub fn router(rt: Shared) -> Router {
         .route("/api/hub/config", post(h_config))
         .route("/api/hub/token", post(h_token))
         .route("/api/hub/clear", post(h_clear))
+        .route("/api/hub/update", post(h_update))
         .route("/api/hub/linktap/valve", post(h_valve))
         .route("/api/hub/linktap/state", get(h_valve_state))
         // The GATEWAY's own push (vendor doc §4.1: full status on every change + a 2-min
@@ -414,6 +415,7 @@ pub async fn dispatch(rt: &Rt, caller: &Caller, method: &str, path: &str, body: 
         ("POST", "/api/hub/config") => do_config(rt, caller, body).await,
         ("POST", "/api/hub/token") => do_token(rt, caller, body).await,
         ("POST", "/api/hub/clear") => do_clear(rt, caller).await,
+        ("POST", "/api/hub/update") => do_update(caller).await,
         ("POST", "/api/hub/linktap/valve") => do_valve(rt, caller, body).await,
         _ => err(404, "no such hub endpoint"),
     }
@@ -508,6 +510,39 @@ async fn do_clear(rt: &Rt, caller: &Caller) -> Answer {
     }
     *rt.keys.write().await = Vec::new();
     Answer { status: 204, body: String::new() }
+}
+
+/// Remote self-update (phase 1b). Co-owner/owner only, the same bar as removing the hub — it
+/// replaces the running software. The work runs in a detached task so the caller gets an immediate
+/// reply: on success the process EXITS and the supervisor relaunches the new binary (there is no
+/// "200 updated" to return to a caller whose hub is about to restart), and the real outcome is
+/// visible as the reported version changing (and in the hub log). On any failure the running binary
+/// is untouched and the reason is logged.
+async fn do_update(caller: &Caller) -> Answer {
+    if !may_administer(&caller.role) {
+        return err(403, "updating the hub needs a co-owner or the owner");
+    }
+    if crate::self_update::asset_for(std::env::consts::OS, std::env::consts::ARCH).is_none() {
+        return err(501, "remote update is not supported on this platform yet — use the app's installer");
+    }
+    tokio::spawn(async {
+        let client = http_client();
+        match crate::self_update::perform_update(&client).await {
+            crate::self_update::UpdateOutcome::Swapped { to_version } => {
+                crate::hlog!("hub: self-update installed {to_version}; exiting for the supervisor to relaunch");
+                // Give the HTTP reply a beat to flush before the process goes.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                std::process::exit(0);
+            }
+            crate::self_update::UpdateOutcome::UpToDate => {
+                crate::hlog!("hub: self-update requested but already current");
+            }
+            crate::self_update::UpdateOutcome::Failed(why) => {
+                crate::hlog!("hub: self-update failed: {why}");
+            }
+        }
+    });
+    ok_json(&serde_json::json!({ "status": "update started" }))
 }
 
 // --- The LAN door ---------------------------------------------------------------------------------
@@ -744,6 +779,10 @@ async fn h_token(State(rt): State<Shared>, headers: HeaderMap, body: axum::body:
 
 async fn h_clear(State(rt): State<Shared>, headers: HeaderMap) -> Response {
     lan_call(&rt, &headers, "POST", "/api/hub/clear", b"").await
+}
+
+async fn h_update(State(rt): State<Shared>, headers: HeaderMap) -> Response {
+    lan_call(&rt, &headers, "POST", "/api/hub/update", b"").await
 }
 
 async fn h_valve(State(rt): State<Shared>, headers: HeaderMap, body: axum::body::Bytes) -> Response {

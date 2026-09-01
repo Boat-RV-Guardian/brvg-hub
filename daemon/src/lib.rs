@@ -11,6 +11,7 @@ pub mod linktap;
 pub mod hub_relay;
 pub mod hub_server;
 pub mod update_check;
+pub mod self_update;
 pub mod linktap_discover;
 pub mod tray_state;
 
