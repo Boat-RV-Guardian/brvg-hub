@@ -108,6 +108,16 @@ jobs:
       # cross-compiler, and `ring` has C and assembly that needs a real one.
       - name: Build (Linux, static ${{ matrix.target }})
         if: runner.os == 'Linux' && matrix.target != ''
+        env:
+          # `cross` treats its own warnings as fatal by default, and one of our DEPENDENCIES
+          # (getrandom) ships a `[package.metadata.cross]` block of its own — which cross reports as
+          # a conflicting configuration and then aborts on, before compiling anything:
+          #   [cross] error: Errors encountered before cross compilation, aborting.
+          #   [cross] note: Disable this with `CROSS_NO_WARNINGS=0`
+          # Nothing here is ours to fix — the config belongs to a crate we merely depend on — so we
+          # take cross's own documented escape. The name reads backwards: 0 means "do not turn
+          # warnings into errors".
+          CROSS_NO_WARNINGS: "0"
         run: |
           cargo install cross --git https://github.com/cross-rs/cross --locked --rev 4090bec
           cross build --release --target "${{ matrix.target }}"
