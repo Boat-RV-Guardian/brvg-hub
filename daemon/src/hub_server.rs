@@ -24,12 +24,13 @@
 // The WebSocket to the worker (remote-control relay + live key pushes) is a later increment; the
 // sync loop's cadence is the revocation latency until it lands.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::response::{IntoResponse, Response};
@@ -200,6 +201,15 @@ pub struct Rt {
     pub store: tokio::sync::Mutex<()>,
     pub started: Instant,
     pub worker_base: String,
+    /// Bumped on every valve observation, and watched by local apps.
+    ///
+    /// 🔴 WHY A NOTIFIER AND NOT A FASTER POLL. Owner ruling 2026-08-31: *"The hub and the app,
+    /// when local, should be talking in real-time... to get all information from the hub faster."*
+    /// The hub ALREADY learns of a change immediately — the LinkTap gateway pushes full status on
+    /// every change to /api/hub/linktap/push, and the 60s poll is only a backstop. So the latency
+    /// the owner saw was never the hub's knowledge; it was the app asking on its own clock. A
+    /// waiter released the moment that knowledge changes takes the interval out of the path.
+    pub valve_rev: tokio::sync::watch::Sender<u64>,
 }
 
 pub type Shared = Arc<Rt>;
@@ -213,6 +223,7 @@ pub fn new_rt(base: PathBuf, worker_base: String) -> Shared {
         started: Instant::now(),
         worker_base,
         linktap: tokio::sync::Mutex::new(None),
+        valve_rev: tokio::sync::watch::channel(0u64).0,
     })
 }
 
@@ -224,6 +235,7 @@ pub fn router(rt: Shared) -> Router {
         .route("/api/hub/token", post(h_token))
         .route("/api/hub/clear", post(h_clear))
         .route("/api/hub/linktap/valve", post(h_valve))
+        .route("/api/hub/linktap/state", get(h_valve_state))
         // The GATEWAY's own push (vendor doc §4.1: full status on every change + a 2-min
         // heartbeat). ⚠️ UNAUTHENTICATED BY NECESSITY — the LinkTap gateway is a fixed-firmware
         // appliance that cannot present a key. That is acceptable ONLY because this route is
@@ -720,6 +732,72 @@ async fn h_valve(State(rt): State<Shared>, headers: HeaderMap, body: axum::body:
     lan_call(&rt, &headers, "POST", "/api/hub/linktap/valve", &body).await
 }
 
+
+/// Valve state for a LOCAL app, with an optional wait.
+///
+/// 🔴 THE APP READS THE HUB, NOT THE GATEWAY (owner ruling 2026-08-31). The app used to poll
+/// `http://<gatewayIp>/api.shtml` itself every 5s on the LAN — a second, independent reader of the
+/// hardware with its own cadence, its own parsing and its own idea of the truth. This endpoint is
+/// what lets that go away.
+///
+/// `wait` turns the read into a LONG POLL: hold the request until the hub observes something new,
+/// then answer immediately. Not an SSE stream and not a callback into the app, for one practical
+/// reason each — the native LAN transport is request/response (a Rust `lan_http_request` shim, no
+/// streaming), and a true webhook would require the app to run a listening socket. A held request
+/// needs neither and collapses the app's polling interval to nothing, which is the whole ask.
+///
+/// The wait is capped below the RELAY's own timeout so the SAME call works off-LAN through the
+/// worker: an app that cannot dial a private IP still gets change-driven updates, just with the
+/// relay's hop in front.
+async fn do_valve_state(rt: &Rt, params: &HashMap<String, String>) -> Answer {
+    let since = params.get("since").and_then(|v| v.parse::<u64>().ok());
+    let wait_secs = params
+        .get("wait")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(MAX_STATE_WAIT_SECS);
+
+    let mut rx = rt.valve_rev.subscribe();
+    let mut rev = *rx.borrow();
+
+    // Only wait when the caller is already current. A caller behind the hub gets the answer now.
+    if wait_secs > 0 && since == Some(rev) {
+        let _ = tokio::time::timeout(Duration::from_secs(wait_secs), rx.changed()).await;
+        rev = *rx.borrow();
+    }
+
+    let valves: Vec<serde_json::Value> = {
+        let guard = rt.linktap.lock().await;
+        match guard.as_ref() {
+            Some(r) => r
+                .measurements()
+                .into_iter()
+                .map(|(dev, params)| {
+                    let mut o = serde_json::Map::new();
+                    o.insert("devId".into(), serde_json::Value::String(dev));
+                    for (k, v) in params {
+                        o.insert(k, serde_json::Value::String(v));
+                    }
+                    serde_json::Value::Object(o)
+                })
+                .collect(),
+            None => Vec::new(),
+        }
+    };
+
+    // `rev` is the caller's cursor for the next call. Echoing it back rather than making the client
+    // invent one keeps the protocol honest when the hub restarts and the counter resets.
+    ok_json(&serde_json::json!({ "rev": rev, "valves": valves }))
+}
+
+async fn h_valve_state(State(rt): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Response {
+    let Some(caller) = caller_from_headers(&rt, &headers).await else {
+        return answer_response(err(401, "a member key is required"));
+    };
+    let _ = caller;
+    answer_response(do_valve_state(&rt, &q).await)
+}
+
 /// Is this push actually FROM the configured gateway?
 ///
 /// The gateway cannot authenticate — it is fixed firmware with no key — so the peer address is the
@@ -1132,6 +1210,11 @@ async fn key_sync_loop(rt: Shared) {
 /// missed push cannot strand stale state.
 const LINKTAP_POLL_SECS: u64 = 60;
 
+/// Longest a `/api/hub/linktap/state` call may be held open. Kept UNDER the relay's own timeout
+/// (hubRelay.ts RELAY_TIMEOUT_MS, 15s) so the identical call works off-LAN through the worker
+/// instead of being killed in transit.
+const MAX_STATE_WAIT_SECS: u64 = 10;
+
 /// Rebuild the machine when the configured gateway/valves change, and keep the paid gate current.
 /// Returns false when LinkTap is not configured or not permitted, in which case nothing polls.
 /// Run one discovery sweep and PERSIST what it finds, so the answer survives a restart and the
@@ -1249,6 +1332,10 @@ async fn linktap_act(
     action: crate::cycle::Action,
     reports: Vec<crate::linktap_runtime::Report>,
 ) {
+    // Every observation lands here, from the poll loop AND from the gateway's push. Releasing the
+    // waiters here means a local app learns what the hub learned, when the hub learned it.
+    rt.valve_rev.send_modify(|v| *v = v.wrapping_add(1));
+
     for r in reports {
         spool_report(rt, &r).await;
     }
@@ -2239,6 +2326,67 @@ mod tests {
             axum::serve(listener, Router::new().route("/api.shtml", post(api))).await.unwrap()
         });
         addr.to_string()
+    }
+
+    #[tokio::test]
+    async fn valve_state_needs_a_member_key() {
+        let base = temp_base("state_auth");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, _rt) = spawn_server(base, vec![key("owner")]).await;
+        let r = reqwest::Client::new().get(format!("{origin}/api/hub/linktap/state")).send().await.unwrap();
+        assert_eq!(r.status(), 401, "the LAN read is a member call like every other");
+    }
+
+    #[tokio::test]
+    async fn valve_state_answers_at_once_when_the_caller_is_behind_the_hub() {
+        // A caller whose cursor is stale must NOT be parked — it already has catching up to do.
+        let base = temp_base("state_behind");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, rt) = spawn_server(base, vec![key("owner")]).await;
+        rt.valve_rev.send_modify(|v| *v = 7);
+
+        let started = Instant::now();
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!("{origin}/api/hub/linktap/state?since=3&wait=10"))
+            .header(KEY_HEADER, key("owner").key)
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(body["rev"], 7);
+        assert!(started.elapsed() < Duration::from_secs(2), "a stale caller waits for nothing");
+    }
+
+    #[tokio::test]
+    async fn valve_state_holds_until_the_hub_observes_something_new() {
+        // 🔴 THE POINT OF THE WHOLE ENDPOINT. Owner ruling 2026-08-31: the app and the hub should
+        // talk in real time on the LAN instead of the app running its own 5s clock against the
+        // gateway. The request parks; the observation releases it.
+        let base = temp_base("state_wait");
+        hub_config::write_config_in(&base, &valve_cfg(true)).unwrap();
+        let (origin, rt) = spawn_server(base, vec![key("owner")]).await;
+
+        let rt2 = rt.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            rt2.valve_rev.send_modify(|v| *v = v.wrapping_add(1));
+        });
+
+        let started = Instant::now();
+        let body: serde_json::Value = reqwest::Client::new()
+            .get(format!("{origin}/api/hub/linktap/state?since=0&wait=10"))
+            .header(KEY_HEADER, key("owner").key)
+            .send().await.unwrap().json().await.unwrap();
+        let waited = started.elapsed();
+
+        assert_eq!(body["rev"], 1, "released by the observation, not by the timeout");
+        assert!(waited >= Duration::from_millis(250), "it really did park: {waited:?}");
+        assert!(waited < Duration::from_secs(3), "and it was released, not timed out: {waited:?}");
+    }
+
+    #[test]
+    fn the_state_wait_stays_under_the_relays_timeout() {
+        // The same call has to survive the worker's relay hop (hubRelay.ts RELAY_TIMEOUT_MS = 15s).
+        // A cap at or above that would have the relay kill the request the hub is deliberately
+        // holding, turning a working long poll into a timeout on every call.
+        assert!(MAX_STATE_WAIT_SECS < 15, "must stay under RELAY_TIMEOUT_MS");
     }
 
     #[tokio::test]

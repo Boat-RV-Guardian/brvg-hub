@@ -27,6 +27,14 @@ pub struct Track {
     /// A reopen this valve is owed, decided in `observe` and PERFORMED by the caller — the same
     /// split `Action::Stop` already uses, so all gateway I/O stays in one place.
     pending_open: Option<PendingOpen>,
+    /// The params of the last `linktap.measurement` this valve produced.
+    ///
+    /// 🔴 THE APP READS THIS, NOT THE GATEWAY. Owner ruling 2026-08-31: *"The app should not be
+    /// talking to the linktap gateway at all, it should only be talking to a hub... except during
+    /// provisioning."* Keeping the MEASUREMENT rather than a private shape means the app on the LAN
+    /// and the app off it are looking at the same fields, mapped the same way — the LAN path stops
+    /// being a second source of truth with its own bugs.
+    last_measurement: Option<Vec<(String, String)>>,
 }
 
 /// A reopen the hub owes a valve: auto-restart of a Normal Run, or the Normal Run a washdown was
@@ -69,7 +77,7 @@ impl Runtime {
         for id in dev_ids {
             let id = linktap::normalize_dev_id(id);
             if !id.is_empty() {
-                tracks.insert(id, Track { state: State::Idle, ledger: None, profile: None, meters: None, pending_open: None });
+                tracks.insert(id, Track { state: State::Idle, ledger: None, profile: None, meters: None, pending_open: None, last_measurement: None });
             }
         }
         Runtime { gateway, unit: VolUnit::Gal, default_profile, tracks }
@@ -149,6 +157,25 @@ impl Runtime {
         }
         // Floor at 5s: a valve seconds from handover must not spin the gateway.
         soonest.map(|s| Duration::from_secs(s.max(5)))
+    }
+
+    /// The last measurement this valve produced, as (key, value) pairs — the SAME params the cloud
+    /// receives. `None` before the first observation.
+    pub fn last_measurement(&self, dev_id: &str) -> Option<&Vec<(String, String)>> {
+        self.tracks.get(&linktap::normalize_dev_id(dev_id))?.last_measurement.as_ref()
+    }
+
+    /// Every valve this hub watches that has produced a measurement, for a whole-hub read.
+    pub fn measurements(&self) -> Vec<(String, Vec<(String, String)>)> {
+        let mut out: Vec<(String, Vec<(String, String)>)> = self
+            .tracks
+            .iter()
+            .filter_map(|(id, t)| t.last_measurement.as_ref().map(|m| (id.clone(), m.clone())))
+            .collect();
+        // Stable order: a map iteration order that shuffles between reads would make the response
+        // look changed when nothing did.
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// Take the reopen this valve is owed, if any. Taking CLEARS it, so a caller that fails to
@@ -327,6 +354,10 @@ impl Runtime {
             }));
         }
 
+        // Kept for the LAN read path as well as spooled to the cloud — one shape, one truth.
+        if let Some(t) = self.tracks.get_mut(&id) {
+            t.last_measurement = Some(params.clone());
+        }
         reports.push(Report { device: format!("lt_{id}"), event: "linktap.measurement".into(), params });
 
         if first_time_not_metering {
