@@ -48,7 +48,12 @@ jobs:
         # runs as root on a customer's machine. It was omitted while it lived only in the daemon
         # tree — the same blind spot that let a broken NSIS script ship: a thing that is built but
         # never checked.
-        run: shellcheck --severity=error --shell=sh hub-lite/brvg-hub-lite.sh hub-lite/hub-lite-mgmt.sh hub-lite/setup-usb-gps.sh hub-lite/test.sh hub-lite/package/build-ipk.sh hub-lite/package/build-feed.sh hub-lite/hub/install.sh daemon/macos/postinstall
+        #
+        # hub-lite-cgi.sh was missing from this list until 2026-08-31, and it is the WEBHOOK
+        # RECEIVER — the script that turns a Shelly's flood report into a local valve close. The
+        # blind spot the note above describes had claimed another one. hub-lite-api.sh is new in
+        # the same commit and went straight in, rather than waiting to be noticed later.
+        run: shellcheck --severity=error --shell=sh hub-lite/brvg-hub-lite.sh hub-lite/hub-lite-mgmt.sh hub-lite/hub-lite-cgi.sh hub-lite/hub-lite-api.sh hub-lite/setup-usb-gps.sh hub-lite/test.sh hub-lite/package/build-ipk.sh hub-lite/package/build-feed.sh hub-lite/hub/install.sh daemon/macos/postinstall
       - name: Build hub-lite package
         run: sh hub-lite/package/build-ipk.sh
       # The feed index is the signed artifact: prove the index describes the package just built,

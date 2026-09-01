@@ -4,7 +4,8 @@
 # (owner correction 2026-08-13), and the X750's 416 KB of free overlay rules out everything else.
 #
 # The Shellys' webhooks are re-registered against this URL instead of the cloud:
-#   http://<router-lan-ip>:8181/cgi-bin/report?device=<id>&event=<ev>&<values...>
+#   http://<router-lan-ip>:8722/cgi-bin/report?device=<id>&event=<ev>&<values...>
+# (8181 also answers, as RECEIVER_LEGACY_PORT, for sensors registered before the 2026-08-31 move.)
 # so a sensor's report never leaves the LAN — which is what lets lockdown's forward chain be
 # deny-all with no allow rules, and means the sensors need neither DNS nor a correct clock.
 #

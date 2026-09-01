@@ -51,7 +51,11 @@ GPS_DEVICE=""
 # receiver sends them to the cloud immediately, on their own.
 HUB_LITE_ENABLED=0
 # LAN port the receiver listens on (the WAN zone drops inbound by default; LAN-only regardless).
-RECEIVER_PORT=8181
+# One contract with the full hub (owner ruling 2026-08-31): same port, same /api/hub/* paths.
+RECEIVER_PORT=8722
+# The port existing Shelly webhooks were registered against. Kept answering so a sensor that has
+# not been re-pointed still reaches the LOCAL FLOOD SHUTOFF. Set to 0 to retire it.
+RECEIVER_LEGACY_PORT=8181
 # Every Nth drain sends a full keyframe instead of a delta, bounding how long a lost report can
 # leave the cloud's view stale.
 KEYFRAME_EVERY=6

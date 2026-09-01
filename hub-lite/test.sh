@@ -697,3 +697,84 @@ write_state "modem.measurement" "up=1&av=9.9.9&rsrp=-107"
 check "write_state: exactly one av in the object" "1" "$(tr ',' '\n' < "$HUB_LITE_STATE" | grep -c '"av"')"
 check "write_state: and it is the header's version, not the param's" "1" "$(grep -c "\"av\":\"$HUB_LITE_VERSION\"" "$HUB_LITE_STATE")"
 rm -rf "$_SD2"
+
+# ── The /api/hub/* door (owner ruling 2026-08-31: "move to 8722, keep one contract") ────────────
+#
+# A hub-lite now answers the SAME paths as the Rust daemon, so the app has one hub client rather
+# than a second ?action= dialect. These pin the contract, because a shape mismatch here is not a
+# hub-lite bug — it is the app silently treating a live hub as absent.
+_api() {  # $1 = PATH_INFO, $2 = conf file (optional)
+  PATH_INFO="$1" BRVG_HUB_LITE_CONF="${2:-/nonexistent-conf}" BRVG_HUB_LITE_BIN=/nonexistent-bin \
+    BRVG_LT_STATE_DIR="$_apidir" sh "$(dirname "$0")/hub-lite-api.sh" 2>/dev/null
+}
+_apidir=$(mktemp -d 2>/dev/null || echo /tmp/brvg-api-test.$$)
+mkdir -p "$_apidir"
+_apiconf="$_apidir/conf"
+cat > "$_apiconf" <<'CONF'
+VEHICLE_ID=v_test
+VEHICLE_KEY=k
+LINKTAP_HOST=192.168.8.50
+LINKTAP_GW_ID=GW02
+LINKTAP_DEV_IDS=aaaabbbbccccdddd
+CONF
+
+out=$(_api /ping | grep -c '"ok":true')
+check "api: ping answers ok without a config or a key" "1" "$out"
+
+out=$(_api /ping | grep -c '"lite":true')
+check "api: ping ADMITS it is a lite hub — a client must not assume full capability" "1" "$out"
+
+out=$(_api /status "$_apiconf" | grep -c '"capabilities":\["linktap"\]')
+check "api: status advertises linktap when a gateway is configured" "1" "$out"
+
+out=$(_api /status | grep -c '"capabilities":\[\]')
+check "api: and advertises NOTHING when no gateway is configured" "1" "$out"
+
+out=$(_api /linktap/state "$_apiconf" | grep -c '"devId":"aaaabbbbccccdddd"')
+check "api: linktap/state names the configured valve" "1" "$out"
+
+# Field names must match the daemon's measurement, or mapHubValveReading needs a special case.
+out=$(_api /linktap/state "$_apiconf" | grep -c '"watering":"0"')
+check "api: a valve with no state file reads CLOSED, never absent" "1" "$out"
+
+printf 'state=watering volL=12.5 remain=600\n' > "$_apidir/brvg-lt-aaaabbbbccccdddd.state"
+out=$(_api /linktap/state "$_apiconf" | grep -c '"watering":"1"')
+check "api: a watering valve is reported watering" "1" "$out"
+out=$(_api /linktap/state "$_apiconf" | grep -c '"vol_l":"12.5"')
+check "api: volume uses the daemon's field name and litres" "1" "$out"
+
+out=$(_api /nope | grep -c '"error"')
+check "api: an unknown verb is a 404 shape, not a silent 200" "1" "$out"
+
+rm -rf "$_apidir"
+
+# ── Washdown on hub-lite (owner: "washdown after") ──────────────────────────────────────────────
+#
+# 🔴 THE RESTART GUARD IS THE SAFETY ONE. The daemon requires mode == Normal to auto-restart
+# (cycle.rs should_auto_restart); this tier checked reason and the switch only. Latent while it ran
+# Normal Runs exclusively — a live water-safety bug the moment washdown exists, because a washdown
+# ending on its own timer would restart as ANOTHER washdown, uncapped, forever.
+lt_should_restart timer 1 normal   && check "restart: a Normal Run timer expiry restarts" "1" "1"
+lt_should_restart timer 1 washdown && check "restart: A WASHDOWN MUST NOT RESTART" "never" "reached" || \
+  check "restart: A WASHDOWN MUST NOT RESTART" "1" "1"
+lt_should_restart timer 1 tankfill && check "restart: a tank fill must not restart either" "never" "reached" || \
+  check "restart: a tank fill must not restart either" "1" "1"
+lt_should_restart timer 1 ""       && check "restart: a state file with no mode is a Normal Run" "1" "1"
+lt_should_restart volume_cap 1 normal && check "restart: a volume cap must not restart" "never" "reached" || \
+  check "restart: a volume cap must not restart" "1" "1"
+lt_should_restart timer 0 normal && check "restart: the switch still governs" "never" "reached" || \
+  check "restart: the switch still governs" "1" "1"
+
+# A washdown is TIME-ONLY: cap 0 disables the cutoff, so no volume can end it.
+out=$(lt_decide watering 1 999999 0 "" 10 300 5)
+check "washdown: no volume cuts a cap-less run" "none" "$out"
+out=$(lt_decide watering 0 999999 0 "" 300 300 0)
+check "washdown: it ends on its TIMER, whatever the volume" "ended:timer" "$out"
+
+# The ledger: a washdown contributes nothing but still rolls the day.
+_ldir=$(mktemp -d 2>/dev/null || echo /tmp/brvg-ldg.$$); mkdir -p "$_ldir"
+out=$(lt_ledger_apply washdown 500 2026-09-01 "$_ldir/l")
+check "ledger: a washdown adds nothing" "0.00" "$out"
+out=$(lt_ledger_apply normal 40 2026-09-01 "$_ldir/l")
+check "ledger: a Normal Run after it still counts from zero" "40.00" "$out"
+rm -rf "$_ldir"

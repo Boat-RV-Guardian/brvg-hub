@@ -2,8 +2,50 @@
 
 One POSIX-shell hub-lite, two homes: a **GL.iNet router** (busybox ash, procd) and a **Raspberry
 Pi-class hub** (systemd). It pushes GPS and modem telemetry **outbound** over HTTPS to the hosted
-worker on a timer, so the vehicle reports without the app being onsite. Phase A = telemetry push;
-the Phase B command channel is deliberately not in this skeleton.
+worker on a timer, so the vehicle reports without the app being onsite.
+
+> ⚠️ **This heading used to say "Phase A = telemetry push; the Phase B command channel is
+> deliberately not in this skeleton", and it was years of commits out of date.** It was read as
+> current on 2026-08-31 and produced a wrong answer to the owner — that a hub-lite could only push
+> telemetry and slam the valve shut on a flood. Not so. What is actually here:
+
+**Present today**
+- Telemetry push (GPS, modem) — the original Phase A.
+- The **webhook receiver**: the vessel's Shellys report to the router, not the cloud, so a sensor's
+  report never leaves the LAN.
+- **Local flood shutoff** — `is_flood_shutoff` + `linktap_flood_close`, the safety path that must
+  work with the uplink down.
+- **Washdown and tank fill**, via `POST /api/hub/linktap/valve` — the daemon's own ValveReq shape.
+  A washdown is time-only and a `volumeCapL` sent with it is REFUSED, exactly as the daemon
+  refuses it. The run's own mode/duration/cap are recorded in its state file, so the next tick
+  continues that cycle instead of adopting it into a Normal Run on the profile's cap.
+- A **LinkTap cycle machine** (`lt_decide`): normal runs, end-reason classification,
+  restart-only-on-timer, adoption of external opens, and the **software volume cutoff** — which
+  fires EARLY by the stop latency, mirroring the daemon's `cutoff_trigger_l`. On a hub-lite this
+  cutoff is the only volume enforcement there is.
+- A **LAN management door** (`hub-lite-mgmt.sh`, `?action=`) for status, lockdown and an
+  allowlisted command set.
+- The **`/api/hub/*` door** (`hub-lite-api.sh`) — `ping`, `status`, `linktap/state` — on port
+  **8722**, the daemon's own contract, so the app has one hub client (owner ruling 2026-08-31:
+  *"the hub-lite should move to 8722, keep one contract"*).
+
+**Deliberately NOT here** (a full hub, or the app, does these)
+- The washdown→Normal **handover** — the daemon reprograms the valve ~20s before a washdown
+  expires so the water never stops. A hub-lite closes and reopens on its next tick instead, which
+  is a visible gap in flow rather than a seamless swap. *Slower, not a different shape.*
+- The daily usage ledger.
+- The relay socket — a persistent WebSocket from busybox ash is not worth the overlay.
+- Long-polling `/api/hub/linktap/state`: `wait` is accepted and ignored. Holding a request would
+  hold a uhttpd worker AND a shell process on a box with 416 KB of free overlay. **A hub-lite is
+  allowed to be slower; it is not allowed to be a different shape.**
+
+Owner doctrine (2026-08-19): *"hub lite should do anything a hub can do as long as it is not
+CPU/memory restrictive."* When adding to this list, say which side of that line the change sits on.
+
+**Ports.** The receiver and both doors listen on **8722**. Port **8181** keeps answering as
+`RECEIVER_LEGACY_PORT` because existing Shelly webhooks were registered against it — moving without
+that would cut those sensors off from the local flood shutoff, and only the app can re-point them.
+Set `RECEIVER_LEGACY_PORT=0` to retire it once nothing points there.
 
 ## How it reports
 
@@ -145,7 +187,7 @@ bench session (2026-08-06) plus standard NMEA/gpsd shapes. Runs in CI (`hub-lite
 
 `HUB_LITE_ENABLED=1` in `/etc/brvg-hub-lite.conf` turns this hub-lite into the **hub-lite tier** of the hub
 architecture: a LAN-only uhttpd instance serves
-`hub-lite-cgi.sh` at `http://<router>:8181/cgi-bin/report`, the Shellys' webhooks are re-registered
+`hub-lite-cgi.sh` at `http://<router>:8722/cgi-bin/report`, the Shellys' webhooks are re-registered
 against it, and the hub-lite drains the spool into ONE `/api/agent/batch` report per modem interval.
 
 Why: the metered link pays per TLS handshake, not per byte — one roll-up connection replaces one
@@ -172,7 +214,7 @@ had packages added); if not stock, it becomes a `Depends:` in the .ipk.
 ## The LAN management door (hub-lite 0.14.0)
 
 The same uhttpd instance also serves **`hub-lite-mgmt.sh` at
-`http://<router>:8181/cgi-bin/mgmt`** — the door an app uses to manage this hub-lite while it is
+`http://<router>:8722/cgi-bin/mgmt`** — the door an app uses to manage this hub-lite while it is
 aboard, instead of driving the ROUTER VENDOR's API or waiting out the cloud command queue.
 
 Owner, 2026-08-21. The app had two ways to reach a router and neither of them was this one. It

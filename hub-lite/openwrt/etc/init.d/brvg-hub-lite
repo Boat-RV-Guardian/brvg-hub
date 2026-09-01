@@ -30,9 +30,37 @@ start_service() {
     # shellcheck disable=SC1091
     [ -f /etc/brvg-hub-lite.conf ] && . /etc/brvg-hub-lite.conf
     if [ -x /usr/sbin/uhttpd ] && [ -d /www/brvg ]; then
+        # ONE CONTRACT, ONE PORT (owner ruling 2026-08-31): a hub-lite answers on 8722, the same
+        # port and the same /api/hub/* paths as the Rust daemon, so the app has one hub dialect
+        # rather than two. `-x /api` is what makes /api/hub/<verb> reach the CGI: uhttpd resolves
+        # the longest existing file path and hands the remainder over as PATH_INFO, so a single
+        # script at /www/brvg/api/hub serves every verb under it.
         procd_open_instance hub_lite
-        procd_set_param command /usr/sbin/uhttpd -f -h /www/brvg -x /cgi-bin -p "0.0.0.0:${RECEIVER_PORT:-8181}"
+        procd_set_param command /usr/sbin/uhttpd -f -h /www/brvg -x /cgi-bin -x /api -p "0.0.0.0:${RECEIVER_PORT:-8722}"
         procd_set_param respawn 3600 30 0
         procd_close_instance
+
+        # ⚠️ THE LEGACY LISTENER IS A SAFETY REQUIREMENT, NOT POLITENESS.
+        #
+        # Every Shelly on an existing vessel has its webhook registered at
+        # http://<router>:8181/cgi-bin/report. Moving the port without this would silently cut those
+        # sensors off from the LOCAL FLOOD SHUTOFF — the one path that exists precisely because the
+        # uplink is least likely to be there during a flood. The sensors are fixed-firmware and do
+        # not re-register themselves; only the app can re-point them, on its own schedule.
+        #
+        # So 8181 keeps answering until every hook has moved. Set RECEIVER_LEGACY_PORT=0 to retire
+        # it once `deviceDiagnostics` reports no sensor still pointing there.
+        # ⚠️ NEVER THE SAME PORT TWICE. An install that predates the 8722 move still has
+        # RECEIVER_PORT=8181 written in its conf, and the legacy default is also 8181 — starting
+        # both would have two uhttpd instances binding one port, the second failing on EADDRINUSE
+        # and procd respawn-looping it forever. Equal ports means the box is simply still on the
+        # old port and needs no second listener at all.
+        if [ "${RECEIVER_LEGACY_PORT:-8181}" != "0" ] && \
+           [ "${RECEIVER_LEGACY_PORT:-8181}" != "${RECEIVER_PORT:-8722}" ]; then
+            procd_open_instance hub_lite_legacy
+            procd_set_param command /usr/sbin/uhttpd -f -h /www/brvg -x /cgi-bin -x /api -p "0.0.0.0:${RECEIVER_LEGACY_PORT:-8181}"
+            procd_set_param respawn 3600 30 0
+            procd_close_instance
+        fi
     fi
 }
