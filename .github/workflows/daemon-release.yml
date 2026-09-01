@@ -40,6 +40,16 @@ jobs:
           # or a bare Linux box runs.
           - os: ubuntu-latest
             artifact: brvg-hub-linux-x64
+          # 🔴 ARM64, and it is not a nicety. A Raspberry Pi-class hub could not run the daemon at
+          # all — there has never been an ARM build — which is the whole reason those boxes run the
+          # POSIX-shell hub-lite instead, with none of the cycle machine, volume cap or handover.
+          # One matrix entry gives them the FULL hub rather than a shell reimplementation of the
+          # code that stops a flood. Consistent with the convergence ruling (owner 2026-08-19):
+          # "the Rust daemon is THE full hub — desktop AND containers"; a Pi is just a bare Linux
+          # box that happens to be ARM.
+          - os: ubuntu-latest
+            artifact: brvg-hub-linux-arm64
+            target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -77,11 +87,35 @@ jobs:
           # download: on its own it is useless, since it exists to watch a hub.
           cp target/release/brvg-hub-tray.exe brvg-hub-tray-windows-x64.exe
 
-      - name: Build (Linux)
-        if: runner.os == 'Linux'
+      - name: Build (Linux, native x64)
+        if: runner.os == 'Linux' && matrix.target == ''
         run: |
           cargo build --release
           cp target/release/brvg-hub "${{ matrix.artifact }}"
+
+      # MUSL, STATIC, and not glibc — this is the difference between a binary that runs on a Pi and
+      # one that dies before main().
+      #
+      # The obvious `aarch64-unknown-linux-gnu` links against the RUNNER's glibc (ubuntu-latest is
+      # 24.04 → 2.39). Raspberry Pi OS bookworm ships 2.36, so that binary fails at startup with
+      # "GLIBC_2.38 not found" on the most common target it exists for — and an architecture check
+      # does not catch it, because the arch is perfectly correct.
+      #
+      # Static musl has no libc floor at all: it runs on any aarch64 Linux, whatever the distro or
+      # its age. Viable here only because the daemon uses rustls everywhere and links no OpenSSL.
+      #
+      # `cross` rather than an apt toolchain: Ubuntu ships gcc-aarch64-linux-gnu but no aarch64 musl
+      # cross-compiler, and `ring` has C and assembly that needs a real one.
+      - name: Build (Linux, static ${{ matrix.target }})
+        if: runner.os == 'Linux' && matrix.target != ''
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross --locked --rev 4090bec
+          cross build --release --target "${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/brvg-hub" "${{ matrix.artifact }}"
+          # Assert BOTH properties. Architecture alone is what made the glibc trap invisible.
+          file "${{ matrix.artifact }}"
+          file "${{ matrix.artifact }}" | grep -q 'ARM aarch64' || { echo "::error::not an aarch64 binary"; exit 1; }
+          file "${{ matrix.artifact }}" | grep -q 'statically linked' || { echo "::error::not static — it will not start on an older distro"; exit 1; }
 
       - name: Build (macOS, universal)
         if: runner.os == 'macOS'
