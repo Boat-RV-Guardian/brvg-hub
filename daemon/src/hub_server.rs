@@ -111,7 +111,9 @@ pub fn may_control(role: &str) -> bool {
 /// PURE: the heartbeat URL. Split out because it IS the wire contract — `hub.measurement` rides
 /// the same `/api/agent` ingest as the router agent and the worker classifies it as telemetry,
 /// never an alert. The only place the hub token meets a URL.
-pub fn heartbeat_url(worker_base: &str, cfg: &HubConfig, ver: &str, platform: &str) -> Result<String, String> {
+pub fn heartbeat_url(
+    worker_base: &str, cfg: &HubConfig, ver: &str, platform: &str, update: Option<&str>,
+) -> Result<String, String> {
     let base = worker_base.trim_end_matches('/');
     let mut u = url::Url::parse(&format!("{base}/api/agent")).map_err(|e| e.to_string())?;
     u.query_pairs_mut()
@@ -122,11 +124,17 @@ pub fn heartbeat_url(worker_base: &str, cfg: &HubConfig, ver: &str, platform: &s
         .append_pair("name", &cfg.name)
         .append_pair("platform", platform)
         .append_pair("ver", ver);
+    // Only present when a newer release exists — the worker stores it flat on the hub's sensorState
+    // doc (extractSensorStateExtras), so the fleet console reads "update available" straight off the
+    // same heartbeat that carries the running version.
+    if let Some(v) = update.filter(|v| !v.is_empty()) {
+        u.query_pairs_mut().append_pair("update", v);
+    }
     Ok(u.to_string())
 }
 
 pub async fn send_heartbeat_once(client: &reqwest::Client, worker_base: &str, cfg: &HubConfig) -> Result<(), String> {
-    let url = heartbeat_url(worker_base, cfg, env!("CARGO_PKG_VERSION"), std::env::consts::OS)?;
+    let url = heartbeat_url(worker_base, cfg, env!("CARGO_PKG_VERSION"), std::env::consts::OS, None)?;
     let res = client.get(url).send().await.map_err(|e| e.without_url().to_string())?;
     if res.status().is_success() {
         Ok(())
@@ -210,6 +218,10 @@ pub struct Rt {
     /// the owner saw was never the hub's knowledge; it was the app asking on its own clock. A
     /// waiter released the moment that knowledge changes takes the interval out of the path.
     pub valve_rev: tokio::sync::watch::Sender<u64>,
+    /// The newest released version, when it is newer than the one running — else None. Written by
+    /// the update-check loop, read by the heartbeat (so the fleet console sees it) and by
+    /// /api/hub/status (so the local app does). Visibility only; nothing here installs anything.
+    pub update_available: tokio::sync::RwLock<Option<String>>,
 }
 
 pub type Shared = Arc<Rt>;
@@ -224,6 +236,7 @@ pub fn new_rt(base: PathBuf, worker_base: String) -> Shared {
         worker_base,
         linktap: tokio::sync::Mutex::new(None),
         valve_rev: tokio::sync::watch::channel(0u64).0,
+        update_available: tokio::sync::RwLock::new(None),
     })
 }
 
@@ -298,6 +311,10 @@ struct StatusBody {
     /// landed in its `hub.json`. `None` in the normal case, so nothing changes for a healthy hub.
     #[serde(skip_serializing_if = "Option::is_none")]
     config_damaged: Option<String>,
+    /// The newest released version, when it is newer than the one running — else omitted. Lets the
+    /// local app show "update available" next to the running version. Visibility only (phase 1a).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update_available: Option<String>,
 }
 
 async fn status_body(rt: &Rt) -> StatusBody {
@@ -317,6 +334,7 @@ async fn status_body(rt: &Rt) -> StatusBody {
         keys_synced: rt.keys.read().await.len(),
         capabilities: capabilities_of(&cfg.linktap),
         shelly_ingest_armed: !cfg.shelly_secret.is_empty(),
+        update_available: rt.update_available.read().await.clone(),
     }
 }
 
@@ -1125,7 +1143,8 @@ async fn heartbeat_loop(rt: Shared) {
     loop {
         let cfg = hub_config::read_config_in(&rt.base);
         if !cfg.token.is_empty() && !cfg.vid.is_empty() && cfg.enabled {
-            match heartbeat_with_reply(&client, &rt.worker_base, &cfg).await {
+            let update = rt.update_available.read().await.clone();
+            match heartbeat_with_reply(&client, &rt.worker_base, &cfg, update.as_deref()).await {
                 Ok(body) => apply_linktap_reply(&rt, &body).await,
                 Err(e) => crate::hlog!("hub: heartbeat failed: {e}"),
             }
@@ -1137,11 +1156,39 @@ async fn heartbeat_loop(rt: Shared) {
     }
 }
 
+/// How often the daemon checks whether a newer release exists. Hours, not minutes: a release lands
+/// a few times a week at most, and this is visibility, not a safety path. Runs once at boot too, so
+/// a freshly started hub reports its update status on its first heartbeat rather than hours later.
+const UPDATE_CHECK_SECS: u64 = 6 * 3600;
+
+/// Poll GitHub for the latest daemon version and record it in `rt.update_available` when it is newer
+/// than the running one. Phase 1a: this only makes the gap VISIBLE (heartbeat + /api/hub/status);
+/// it installs nothing. Every failure is silent — an offline or locked-down hub reports no update
+/// rather than an error, and never a false positive.
+async fn update_check_loop(rt: Shared) {
+    let client = http_client();
+    let current = env!("CARGO_PKG_VERSION");
+    loop {
+        if let Some(latest) = crate::update_check::fetch_latest_version(&client).await {
+            let available = crate::update_check::newer_than(&latest, current);
+            let mut slot = rt.update_available.write().await;
+            if *slot != available {
+                match &available {
+                    Some(v) => crate::hlog!("hub: update available - running {current}, {v} released"),
+                    None => if slot.is_some() { crate::hlog!("hub: now up to date at {current}") },
+                }
+                *slot = available;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(UPDATE_CHECK_SECS)).await;
+    }
+}
+
 /// The heartbeat, keeping its reply — the config-as-state channel (cloud-server #105 attaches
 /// `{linktap:{allowed,profiles}}` to a hub's report). send_heartbeat_once stays for callers that
 /// only care whether it landed.
-async fn heartbeat_with_reply(client: &reqwest::Client, worker_base: &str, cfg: &HubConfig) -> Result<serde_json::Value, String> {
-    let url = heartbeat_url(worker_base, cfg, env!("CARGO_PKG_VERSION"), std::env::consts::OS)?;
+async fn heartbeat_with_reply(client: &reqwest::Client, worker_base: &str, cfg: &HubConfig, update: Option<&str>) -> Result<serde_json::Value, String> {
+    let url = heartbeat_url(worker_base, cfg, env!("CARGO_PKG_VERSION"), std::env::consts::OS, update)?;
     let res = client.get(url).send().await.map_err(|e| e.without_url().to_string())?;
     if !res.status().is_success() {
         return Err(format!("HTTP {}", res.status().as_u16()));
@@ -1722,6 +1769,7 @@ where
             );
         }
         tokio::spawn(heartbeat_loop(rt.clone()));
+        tokio::spawn(update_check_loop(rt.clone()));
         tokio::spawn(key_sync_loop(rt.clone()));
         // The LinkTap poll floor. It re-reads its own configuration each pass, so a gateway
         // configured (or a plan revoked) after boot is picked up without a restart.
@@ -1950,7 +1998,7 @@ mod tests {
     #[test]
     fn the_heartbeat_is_a_hub_measurement_on_the_agent_wire() {
         let cfg = seeded_cfg();
-        let u = url::Url::parse(&heartbeat_url("https://w.example/", &cfg, "1.0.82", "windows").unwrap()).unwrap();
+        let u = url::Url::parse(&heartbeat_url("https://w.example/", &cfg, "1.0.82", "windows", None).unwrap()).unwrap();
         assert_eq!(u.path(), "/api/agent"); // same ingest as the router agent
         let q: HashMap<_, _> = u.query_pairs().into_owned().collect();
         assert_eq!(q["vid"], "v1");
@@ -1960,12 +2008,25 @@ mod tests {
         assert_eq!(q["name"], "Central");
         assert_eq!(q["platform"], "windows");
         assert_eq!(q["ver"], "1.0.82");
+        assert!(!q.contains_key("update")); // absent when there is no newer release
+    }
+
+    #[test]
+    fn the_heartbeat_carries_an_update_marker_only_when_one_exists() {
+        let cfg = seeded_cfg();
+        // No update → no param (also covers an empty string being treated as none).
+        let none = url::Url::parse(&heartbeat_url("https://w.example", &cfg, "0.3.23", "linux", Some("")).unwrap()).unwrap();
+        assert!(!none.query_pairs().any(|(k, _)| k == "update"));
+        // A newer release → the version rides the heartbeat, so the fleet console reads it flat.
+        let some = url::Url::parse(&heartbeat_url("https://w.example", &cfg, "0.3.23", "linux", Some("0.3.24")).unwrap()).unwrap();
+        let q: HashMap<_, _> = some.query_pairs().into_owned().collect();
+        assert_eq!(q["update"], "0.3.24");
     }
 
     #[test]
     fn a_hub_name_with_spaces_and_symbols_cannot_break_the_query() {
         let cfg = HubConfig { name: "Jon's boat & RV=hub".into(), ..seeded_cfg() };
-        let raw = heartbeat_url("https://w.example", &cfg, "1.0.82", "macos").unwrap();
+        let raw = heartbeat_url("https://w.example", &cfg, "1.0.82", "macos", None).unwrap();
         assert!(!raw.contains("boat & RV"), "the name must be encoded: {raw}");
         let q: HashMap<_, _> = url::Url::parse(&raw).unwrap().query_pairs().into_owned().collect();
         assert_eq!(q["name"], "Jon's boat & RV=hub");
