@@ -40,6 +40,16 @@ jobs:
           # or a bare Linux box runs.
           - os: ubuntu-latest
             artifact: brvg-hub-linux-x64
+          # 🔴 ARM64, and it is not a nicety. A Raspberry Pi-class hub could not run the daemon at
+          # all — there has never been an ARM build — which is the whole reason those boxes run the
+          # POSIX-shell hub-lite instead, with none of the cycle machine, volume cap or handover.
+          # One matrix entry gives them the FULL hub rather than a shell reimplementation of the
+          # code that stops a flood. Consistent with the convergence ruling (owner 2026-08-19):
+          # "the Rust daemon is THE full hub — desktop AND containers"; a Pi is just a bare Linux
+          # box that happens to be ARM.
+          - os: ubuntu-latest
+            artifact: brvg-hub-linux-arm64
+            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -77,11 +87,30 @@ jobs:
           # download: on its own it is useless, since it exists to watch a hub.
           cp target/release/brvg-hub-tray.exe brvg-hub-tray-windows-x64.exe
 
-      - name: Build (Linux)
-        if: runner.os == 'Linux'
+      - name: Build (Linux, native x64)
+        if: runner.os == 'Linux' && matrix.target == ''
         run: |
           cargo build --release
           cp target/release/brvg-hub "${{ matrix.artifact }}"
+
+      # Cross-compiled rather than built on an ARM runner: hosted ARM runners are not available to
+      # this repo, and `cross`/QEMU would emulate a full Rust build for no gain. The linker is the
+      # only thing the host lacks.
+      - name: Build (Linux, cross to ${{ matrix.target }})
+        if: runner.os == 'Linux' && matrix.target != ''
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add "${{ matrix.target }}"
+          cargo build --release --target "${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/brvg-hub" "${{ matrix.artifact }}"
+          # Prove what was actually produced. A silently-native binary here would install on a Pi
+          # and refuse to exec, which is a confusing way to learn the matrix entry did nothing.
+          file "${{ matrix.artifact }}"
+          file "${{ matrix.artifact }}" | grep -q 'ARM aarch64' || { echo "::error::not an aarch64 binary"; exit 1; }
 
       - name: Build (macOS, universal)
         if: runner.os == 'macOS'
