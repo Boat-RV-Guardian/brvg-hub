@@ -10,6 +10,7 @@ pub mod linktap_runtime;
 pub mod linktap;
 pub mod hub_relay;
 pub mod hub_server;
+pub mod update_check;
 pub mod linktap_discover;
 pub mod tray_state;
 
