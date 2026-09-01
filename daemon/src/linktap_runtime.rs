@@ -314,6 +314,15 @@ impl Runtime {
         if let Some(rf) = data.get("is_rf_linked").map(linktap::coerce_watering) {
             params.push(("rf".into(), if rf { "1".into() } else { "0".to_string() }));
         }
+        // ⚠️ THE VALVE'S FAULT FLAGS, and they are the reason this list is not "nice to have".
+        // The app raises broken / leak / clog from these, and it read them off its own gateway poll.
+        // Moving the app onto the hub without carrying them would have quietly deleted valve fault
+        // detection while every screen still looked right — the worst shape a regression can take.
+        for (src, out) in [("is_broken", "broken"), ("is_leak", "leak"), ("is_clog", "clog"), ("is_cutoff", "cutoff")] {
+            if let Some(v) = data.get(src).map(linktap::coerce_watering) {
+                params.push((out.into(), if v { "1".into() } else { "0".to_string() }));
+            }
+        }
         // THE LIVE FLOW RATE, in LITRES PER MINUTE. `speed_lpm` has always been computed here —
         // it drives the cutoff's stop-latency lead (cycle::cutoff_trigger_l) — but it was never
         // reported, so an app that is OFF the LAN (relay or cloud) had volume with no rate and
@@ -832,6 +841,19 @@ mod tests {
         assert_eq!(p("battery"), Some("93".into()));
         assert_eq!(p("signal"), Some("69".into()));
         assert_eq!(p("rf"), Some("1".into()));
+
+        // The fault flags the app raises alarms from.
+        let (_, faults) = r.observe(
+            DEV,
+            &json!({"is_watering":0,"is_broken":true,"is_leak":false,"is_clog":true,"is_cutoff":false}),
+            T0 + 1000,
+        );
+        let mf = faults.iter().find(|x| x.event == "linktap.measurement").unwrap();
+        let pf = |k: &str| mf.params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(pf("broken"), Some("1".into()));
+        assert_eq!(pf("leak"), Some("0".into()));
+        assert_eq!(pf("clog"), Some("1".into()));
+        assert_eq!(pf("cutoff"), Some("0".into()));
 
         // A gateway that omits them must not invent zeros — a missing reading is not a flat battery.
         let mut r2 = rt(VolUnit::Litre);
