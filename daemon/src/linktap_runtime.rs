@@ -298,6 +298,22 @@ impl Runtime {
             ("vol_l".into(), format!("{volume_l:.2}")),
             ("meters".into(), if meters { "1".to_string() } else { "0".to_string() }),
         ];
+        // THE VALVE'S OWN HEALTH, carried on the measurement so the app never needs the gateway.
+        //
+        // 🔴 Owner ruling 2026-08-31: "The app should not be talking to the linktap gateway at all,
+        // it should only be talking to a hub." The app's valve view shows battery, RF signal and
+        // link state, and it read all three straight off its own cmd-3 poll. Without them here the
+        // app cannot stop polling — it would have to keep a second reader alive for three fields.
+        // The hub already HAS them: they arrive in the same payload it is parsing.
+        if let Some(b) = data.get("battery").and_then(|v| v.as_f64()) {
+            params.push(("battery".into(), format!("{}", b.round() as i64)));
+        }
+        if let Some(sig) = data.get("signal").and_then(|v| v.as_f64()) {
+            params.push(("signal".into(), format!("{}", sig.round() as i64)));
+        }
+        if let Some(rf) = data.get("is_rf_linked").map(linktap::coerce_watering) {
+            params.push(("rf".into(), if rf { "1".into() } else { "0".to_string() }));
+        }
         // THE LIVE FLOW RATE, in LITRES PER MINUTE. `speed_lpm` has always been computed here —
         // it drives the cutoff's stop-latency lead (cycle::cutoff_trigger_l) — but it was never
         // reported, so an app that is OFF the LAN (relay or cloud) had volume with no rate and
@@ -797,6 +813,33 @@ mod tests {
         assert_eq!(b[0].0, DEV, "long ids normalise to the canonical 16");
         assert!(parse_gateway_push("not json").is_empty());
         assert!(parse_gateway_push("{}").is_empty());
+    }
+
+    #[test]
+    fn the_measurement_carries_everything_the_app_reads_off_the_gateway() {
+        // 🔴 THE CONTRACT THAT LETS THE APP STOP POLLING. Owner ruling 2026-08-31: "The app should
+        // not be talking to the linktap gateway at all." The app's valve view shows battery, RF
+        // signal and link state, and read all three off its OWN cmd-3 poll. If the hub does not
+        // carry them, the app cannot stop — it would keep a second reader alive for three fields.
+        let mut r = rt(VolUnit::Litre);
+        let (_, reports) = r.observe(
+            DEV,
+            &json!({"is_watering":1,"vol":3.2,"speed":5.5,"battery":93,"signal":69,"is_rf_linked":true}),
+            T0,
+        );
+        let m = reports.iter().find(|x| x.event == "linktap.measurement").expect("a measurement");
+        let p = |k: &str| m.params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(p("battery"), Some("93".into()));
+        assert_eq!(p("signal"), Some("69".into()));
+        assert_eq!(p("rf"), Some("1".into()));
+
+        // A gateway that omits them must not invent zeros — a missing reading is not a flat battery.
+        let mut r2 = rt(VolUnit::Litre);
+        let (_, reports2) = r2.observe(DEV, &json!({"is_watering":0}), T0);
+        let m2 = reports2.iter().find(|x| x.event == "linktap.measurement").unwrap();
+        for k in ["battery", "signal", "rf"] {
+            assert!(m2.params.iter().all(|(a, _)| a != k), "{k} must be absent, not zero");
+        }
     }
 
     #[test]
