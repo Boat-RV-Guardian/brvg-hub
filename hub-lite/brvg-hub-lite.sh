@@ -1390,6 +1390,31 @@ lt_day_key() { date -u +%F; }
 # than the vehicle's Normal Run, so the profile cannot answer for it. All three are absent in files
 # written before 2026-08-31 and default to the profile's Normal Run, which is what those files
 # meant.
+# Load one valve's persisted cycle into the machine's variables.
+#
+# 🔴 EXTRACTED BECAUSE THE BUG THAT LIVED HERE WAS UNTESTABLE INLINE. The state file writes `state=`
+# and the machine reads `_state`; sourcing sets the UNPREFIXED name, so the persisted cycle never
+# loaded — _state was `idle` on every tick. `lt_decide` only evaluates the software volume cutoff on
+# the `_prev != idle` branch, so it returned `adopt` forever and THE CUTOFF NEVER FIRED, on the tier
+# whose own comment calls it "the only volume enforcement there is".
+#
+# Sets: _state _started _stop _mode _dur_eff _cap_eff. $1 = state file, $2 = profile duration,
+# $3 = profile cap. Everything is cleared first, because these are set by SOURCING and would
+# otherwise leak from the previous valve in a multi-valve loop.
+lt_load_state() {
+  state=""; started=""; stop=""; mode=""; dur=""; cap=""
+  # shellcheck disable=SC1090
+  [ -f "$1" ] && . "$1"
+  _state="${state:-idle}"
+  _started="${started:-0}"
+  _stop="${stop:-}"
+  # This run's own targets win over the profile's; absent means "a Normal Run on the profile",
+  # which is exactly what a state file written before 2026-09-01 meant.
+  _mode="${mode:-normal}"
+  _dur_eff="${dur:-$2}"
+  _cap_eff="${cap:-$3}"
+}
+
 LT_STATE_DIR="${LT_STATE_DIR:-/tmp/brvg-linktap}"
 
 linktap_tick() {
@@ -1429,31 +1454,26 @@ linktap_tick() {
     _w="$1"; _volL="$2"; _speedL="${4:-0}"
 
     _sf="$LT_STATE_DIR/$_d"
-    _state=idle; _started=0; _stop=""
-    # ⚠️ CLEARED EVERY ITERATION. These are set by SOURCING the state file, so without this the
-    # second valve in a multi-valve loop inherits the first one's mode and targets — a Normal Run
-    # silently wearing a washdown's uncapped settings.
-    mode=""; dur=""; cap=""
-    # shellcheck disable=SC1090
-    [ -f "$_sf" ] && . "$_sf"
-    # This run's own targets win over the profile's; absent means "a Normal Run on the profile",
-    # which is exactly what a pre-2026-08-31 state file meant.
-    _mode="${mode:-normal}"
-    _dur_eff="${dur:-$_dur}"
-    _cap_eff="${cap:-$_capL}"
+    lt_load_state "$_sf" "$_dur" "$_capL"
     _elapsed=$(( $(date +%s) - _started ))
 
     _act=$(lt_decide "$_state" "$_w" "$_volL" "$_cap_eff" "$_stop" "$_elapsed" "$_dur_eff" "$_speedL")
     case "$_act" in
       adopt)
         # Manual press / external open IS a Normal Run with the profile cap (owner rule).
-        printf 'state=watering\nstarted=%s\nstop=\n' "$(date +%s)" > "$_sf"
+        # An ADOPTED cycle is a Normal Run on the profile by the owner's rule, so it records those
+        # targets explicitly rather than leaving them absent and inheriting whatever comes next.
+        printf 'state=watering\nstarted=%s\nstop=\nmode=normal\ndur=%s\ncap=%s\n' \
+          "$(date +%s)" "$_dur" "$_capL" > "$_sf"
         logger -t brvg-hub-lite "linktap: adopted a running cycle on ${_d} (Normal Run cap ${_capL}L)" 2>/dev/null || true
         ;;
       cut)
         curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
           -d "$(linktap_stop_body "$LINKTAP_GW_ID" "$_d")" "http://${LINKTAP_HOST}/api.shtml" >/dev/null 2>&1
-        printf 'state=watering\nstarted=%s\nstop=volume_cap\n' "$_started" > "$_sf"
+        # Keep the run's identity through the stop, so the close that follows classifies against
+        # the cycle that was actually running rather than a default Normal Run.
+        printf 'state=watering\nstarted=%s\nstop=volume_cap\nmode=%s\ndur=%s\ncap=%s\n' \
+          "$_started" "$_mode" "$_dur_eff" "$_cap_eff" > "$_sf"
         logger -t brvg-hub-lite "linktap: volume cap ${_capL}L reached on ${_d} — stop issued" 2>/dev/null || true
         ;;
       ended:*)
@@ -1471,7 +1491,8 @@ linktap_tick() {
           _capGw=$(awk -v c="$_capL" -v u="$_unit" 'BEGIN{printf "%.2f", (u=="gal") ? c/3.785411784 : c}')
           curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
             -d "$(lt_start_body "$LINKTAP_GW_ID" "$_d" "$_dur" "$_capGw")" "http://${LINKTAP_HOST}/api.shtml" >/dev/null 2>&1 \
-            && printf 'state=watering\nstarted=%s\nstop=\n' "$(date +%s)" > "$_sf"
+            && printf 'state=watering\nstarted=%s\nstop=\nmode=normal\ndur=%s\ncap=%s\n' \
+                 "$(date +%s)" "$_dur" "$_capL" > "$_sf"
           logger -t brvg-hub-lite "linktap: timer expired on ${_d}, auto-restart on — fresh Normal Run" 2>/dev/null || true
         fi
         ;;

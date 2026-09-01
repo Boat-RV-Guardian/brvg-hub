@@ -778,3 +778,38 @@ check "ledger: a washdown adds nothing" "0.00" "$out"
 out=$(lt_ledger_apply normal 40 2026-09-01 "$_ldir/l")
 check "ledger: a Normal Run after it still counts from zero" "40.00" "$out"
 rm -rf "$_ldir"
+
+# ── The persisted cycle must actually load ──────────────────────────────────────────────────────
+#
+# 🔴 IT DID NOT, AND THE COST WAS THE VOLUME CUTOFF. The state file writes `state=` and the machine
+# reads `_state`; sourcing sets the UNPREFIXED name, so _state was `idle` on EVERY tick. lt_decide
+# only evaluates the software cutoff on the `_prev != idle` branch, so it returned `adopt` forever
+# and the cutoff never fired — on the tier whose own comment calls it "the only volume enforcement
+# there is", because the hardware ignores volume_limit. A hub-lite vessel had no volume bound on its
+# water at all; only the duration ceiling ever stopped a run.
+_lsdir=$(mktemp -d 2>/dev/null || echo /tmp/brvg-ls.$$); mkdir -p "$_lsdir"
+
+printf 'state=watering\nstarted=1700000000\nstop=volume_cap\nmode=washdown\ndur=300\ncap=0\n' > "$_lsdir/a"
+lt_load_state "$_lsdir/a" 86400 378
+check "load: a watering valve reads as WATERING, not idle" "watering" "$_state"
+check "load: started survives (elapsed was measured from epoch 0)" "1700000000" "$_started"
+check "load: stop_issued survives, so a cut is not re-issued every tick" "volume_cap" "$_stop"
+check "load: the run's own mode survives" "washdown" "$_mode"
+check "load: and its own targets beat the profile's" "300 0" "$_dur_eff $_cap_eff"
+
+# The end-to-end consequence: a NORMAL run past its cap must now reach the cutoff branch at all.
+printf 'state=watering\nstarted=1700000000\nstop=\nmode=normal\ndur=86400\ncap=378\n' > "$_lsdir/b"
+lt_load_state "$_lsdir/b" 86400 378
+out=$(lt_decide "$_state" 1 400 "$_cap_eff" "$_stop" 100 "$_dur_eff" 0)
+check "load: THE VOLUME CUTOFF FIRES — 400L past a 378L cap" "cut" "$out"
+
+# A file with no mode/dur/cap is a Normal Run on the profile — what every older file meant.
+printf 'state=watering\nstarted=1700000000\nstop=\n' > "$_lsdir/c"
+lt_load_state "$_lsdir/c" 86400 378
+check "load: an older state file is a Normal Run on the profile" "normal 86400 378" "$_mode $_dur_eff $_cap_eff"
+
+# Absent file: idle, and no inherited values from the valve before it in the loop.
+lt_load_state "$_lsdir/nope" 86400 378
+check "load: no file means idle" "idle" "$_state"
+check "load: and nothing leaks in from the previous valve" "normal 86400 378 0 " "$_mode $_dur_eff $_cap_eff $_started $_stop"
+rm -rf "$_lsdir"
