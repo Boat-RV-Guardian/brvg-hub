@@ -49,7 +49,7 @@ jobs:
           # box that happens to be ARM.
           - os: ubuntu-latest
             artifact: brvg-hub-linux-arm64
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -93,24 +93,29 @@ jobs:
           cargo build --release
           cp target/release/brvg-hub "${{ matrix.artifact }}"
 
-      # Cross-compiled rather than built on an ARM runner: hosted ARM runners are not available to
-      # this repo, and `cross`/QEMU would emulate a full Rust build for no gain. The linker is the
-      # only thing the host lacks.
-      - name: Build (Linux, cross to ${{ matrix.target }})
+      # MUSL, STATIC, and not glibc — this is the difference between a binary that runs on a Pi and
+      # one that dies before main().
+      #
+      # The obvious `aarch64-unknown-linux-gnu` links against the RUNNER's glibc (ubuntu-latest is
+      # 24.04 → 2.39). Raspberry Pi OS bookworm ships 2.36, so that binary fails at startup with
+      # "GLIBC_2.38 not found" on the most common target it exists for — and an architecture check
+      # does not catch it, because the arch is perfectly correct.
+      #
+      # Static musl has no libc floor at all: it runs on any aarch64 Linux, whatever the distro or
+      # its age. Viable here only because the daemon uses rustls everywhere and links no OpenSSL.
+      #
+      # `cross` rather than an apt toolchain: Ubuntu ships gcc-aarch64-linux-gnu but no aarch64 musl
+      # cross-compiler, and `ring` has C and assembly that needs a real one.
+      - name: Build (Linux, static ${{ matrix.target }})
         if: runner.os == 'Linux' && matrix.target != ''
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          rustup target add "${{ matrix.target }}"
-          cargo build --release --target "${{ matrix.target }}"
+          cargo install cross --git https://github.com/cross-rs/cross --locked --rev 4090bec
+          cross build --release --target "${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/brvg-hub" "${{ matrix.artifact }}"
-          # Prove what was actually produced. A silently-native binary here would install on a Pi
-          # and refuse to exec, which is a confusing way to learn the matrix entry did nothing.
+          # Assert BOTH properties. Architecture alone is what made the glibc trap invisible.
           file "${{ matrix.artifact }}"
           file "${{ matrix.artifact }}" | grep -q 'ARM aarch64' || { echo "::error::not an aarch64 binary"; exit 1; }
+          file "${{ matrix.artifact }}" | grep -q 'statically linked' || { echo "::error::not static — it will not start on an older distro"; exit 1; }
 
       - name: Build (macOS, universal)
         if: runner.os == 'macOS'
