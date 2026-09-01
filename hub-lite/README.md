@@ -19,7 +19,7 @@ worker on a timer, so the vehicle reports without the app being onsite.
   A washdown is time-only and a `volumeCapL` sent with it is REFUSED, exactly as the daemon
   refuses it. The run's own mode/duration/cap are recorded in its state file, so the next tick
   continues that cycle instead of adopting it into a Normal Run on the profile's cap.
-- A **LinkTap cycle machine** (`lt_decide`): normal runs, end-reason classification,
+- A **LinkTap cycle machine** (`lt_decide` + `lt_load_state`): normal runs, end-reason classification,
   restart-only-on-timer, adoption of external opens, and the **software volume cutoff** — which
   fires EARLY by the stop latency, mirroring the daemon's `cutoff_trigger_l`. On a hub-lite this
   cutoff is the only volume enforcement there is.
