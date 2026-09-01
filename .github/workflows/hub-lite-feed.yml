@@ -59,7 +59,11 @@ jobs:
           cc -O2 -o /usr/local/bin/usign \
             usign-src/main.c usign-src/base64.c usign-src/ed25519.c \
             usign-src/edsign.c usign-src/f25519.c usign-src/fprime.c usign-src/sha512.c
-          usign 2>&1 | grep -q 'verify' || { echo "::error::usign did not build usably"; exit 1; }
+          # usign exits non-zero on its no-arg usage message, so under `set -o pipefail` a
+          # `usign | grep` pipeline reports the usign failure even when grep matched. Capture first,
+          # then test — the check is "does the usage text mention verify", not "does usign exit 0".
+          usage="$(usign 2>&1 || true)"
+          echo "$usage" | grep -q 'verify' || { echo "::error::usign did not build usably"; exit 1; }
 
       - name: Build the package
         run: sh hub-lite/package/build-ipk.sh
