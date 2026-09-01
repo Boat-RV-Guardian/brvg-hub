@@ -15,6 +15,10 @@ worker on a timer, so the vehicle reports without the app being onsite.
   report never leaves the LAN.
 - **Local flood shutoff** — `is_flood_shutoff` + `linktap_flood_close`, the safety path that must
   work with the uplink down.
+- **Washdown and tank fill**, via `POST /api/hub/linktap/valve` — the daemon's own ValveReq shape.
+  A washdown is time-only and a `volumeCapL` sent with it is REFUSED, exactly as the daemon
+  refuses it. The run's own mode/duration/cap are recorded in its state file, so the next tick
+  continues that cycle instead of adopting it into a Normal Run on the profile's cap.
 - A **LinkTap cycle machine** (`lt_decide`): normal runs, end-reason classification,
   restart-only-on-timer, adoption of external opens, and the **software volume cutoff** — which
   fires EARLY by the stop latency, mirroring the daemon's `cutoff_trigger_l`. On a hub-lite this
@@ -26,7 +30,9 @@ worker on a timer, so the vehicle reports without the app being onsite.
   *"the hub-lite should move to 8722, keep one contract"*).
 
 **Deliberately NOT here** (a full hub, or the app, does these)
-- Washdown and tank fill, and therefore the washdown→Normal handover.
+- The washdown→Normal **handover** — the daemon reprograms the valve ~20s before a washdown
+  expires so the water never stops. A hub-lite closes and reopens on its next tick instead, which
+  is a visible gap in flow rather than a seamless swap. *Slower, not a different shape.*
 - The daily usage ledger.
 - The relay socket — a persistent WebSocket from busybox ash is not worth the overlay.
 - Long-polling `/api/hub/linktap/state`: `wait` is accepted and ignored. Holding a request would

@@ -1288,9 +1288,20 @@ lt_decide() {
   echo "ended:unknown"
 }
 
-# ONLY a timer expiry restarts (cycle.ts shouldAutoRestart). $1 reason, $2 enabled (0/1).
+# ONLY a timer expiry of a NORMAL run restarts. $1 reason, $2 enabled (0/1), $3 mode.
+#
+# ⚠️ THE MODE CHECK IS THE WHOLE POINT AND IT WAS MISSING. The daemon's rule is
+# `auto_restart_enabled && ended.mode == Mode::Normal && ended.reason == EndReason::Timer`
+# (cycle.rs should_auto_restart); this tested reason and the switch only. Latent while hub-lite ran
+# Normal Runs exclusively — and a live water-safety bug the moment washdown exists here, because a
+# washdown ending on its own timer would restart as ANOTHER washdown, uncapped, forever.
+#
+# Mode absent reads as normal: that is what every state file written before this change means, and
+# treating an old file as a washdown would silently stop honouring auto-restart on upgrade.
 lt_should_restart() {
-  [ "$2" = "1" ] && [ "$1" = "timer" ]
+  [ "$2" = "1" ] || return 1
+  [ "$1" = "timer" ] || return 1
+  case "${3:-normal}" in normal|'') return 0 ;; *) return 1 ;; esac
 }
 
 # cmd 6 body — duration SECONDS, volume_limit in the GATEWAY unit ($3 already converted).
@@ -1373,6 +1384,12 @@ lt_day_key() { date -u +%F; }
 
 # One poll pass over every configured valve. State per valve in $LT_STATE_DIR/<dev>:
 #   state=idle|watering  started=<epoch>  stop= |volume_cap|manual|flood_shutoff
+#   mode=normal|washdown|tankfill   dur=<secs>   cap=<litres>
+#
+# mode/dur/cap describe THIS RUN, not the profile: a washdown is time-only with a different length
+# than the vehicle's Normal Run, so the profile cannot answer for it. All three are absent in files
+# written before 2026-08-31 and default to the profile's Normal Run, which is what those files
+# meant.
 LT_STATE_DIR="${LT_STATE_DIR:-/tmp/brvg-linktap}"
 
 linktap_tick() {
@@ -1413,11 +1430,20 @@ linktap_tick() {
 
     _sf="$LT_STATE_DIR/$_d"
     _state=idle; _started=0; _stop=""
+    # ⚠️ CLEARED EVERY ITERATION. These are set by SOURCING the state file, so without this the
+    # second valve in a multi-valve loop inherits the first one's mode and targets — a Normal Run
+    # silently wearing a washdown's uncapped settings.
+    mode=""; dur=""; cap=""
     # shellcheck disable=SC1090
     [ -f "$_sf" ] && . "$_sf"
+    # This run's own targets win over the profile's; absent means "a Normal Run on the profile",
+    # which is exactly what a pre-2026-08-31 state file meant.
+    _mode="${mode:-normal}"
+    _dur_eff="${dur:-$_dur}"
+    _cap_eff="${cap:-$_capL}"
     _elapsed=$(( $(date +%s) - _started ))
 
-    _act=$(lt_decide "$_state" "$_w" "$_volL" "$_capL" "$_stop" "$_elapsed" "$_dur" "$_speedL")
+    _act=$(lt_decide "$_state" "$_w" "$_volL" "$_cap_eff" "$_stop" "$_elapsed" "$_dur_eff" "$_speedL")
     case "$_act" in
       adopt)
         # Manual press / external open IS a Normal Run with the profile cap (owner rule).
@@ -1433,14 +1459,15 @@ linktap_tick() {
       ended:*)
         _reason="${_act#ended:}"
         rm -f "$_sf"
-        # The cycle's MODE decides whether it counts. This tier only ever runs Normal Runs today
-        # (washdown/tank fill stay app- and hub-driven), so an ended cycle here is normal — stated
-        # explicitly rather than assumed, so adding washdown later cannot silently miscount.
-        _dayvol=$(lt_ledger_apply normal "$_volL" "$(lt_day_key)" "$LT_STATE_DIR/ledger.$_d")
+        # The cycle's MODE decides whether it counts, and washdown does NOT (daemon cycle.rs
+        # apply_to_ledger, owner rule). The note that used to sit here said this tier only ran
+        # Normal Runs and that adding washdown must not silently miscount — this is that change
+        # honouring its own warning.
+        _dayvol=$(lt_ledger_apply "$_mode" "$_volL" "$(lt_day_key)" "$LT_STATE_DIR/ledger.$_d")
         printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "lt_${_d}" "linktap.cycle.change" \
           "reason=${_reason}&vol_l=${_volL}&day=$(lt_day_key)&day_vol_l=${_dayvol}" \
           >> "${BRVG_RELAY_SPOOL:-/tmp/brvg-relay.spool}"
-        if lt_should_restart "$_reason" "$_ar"; then
+        if lt_should_restart "$_reason" "$_ar" "$_mode"; then
           _capGw=$(awk -v c="$_capL" -v u="$_unit" 'BEGIN{printf "%.2f", (u=="gal") ? c/3.785411784 : c}')
           curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' \
             -d "$(lt_start_body "$LINKTAP_GW_ID" "$_d" "$_dur" "$_capGw")" "http://${LINKTAP_HOST}/api.shtml" >/dev/null 2>&1 \

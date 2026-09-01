@@ -747,3 +747,34 @@ out=$(_api /nope | grep -c '"error"')
 check "api: an unknown verb is a 404 shape, not a silent 200" "1" "$out"
 
 rm -rf "$_apidir"
+
+# ── Washdown on hub-lite (owner: "washdown after") ──────────────────────────────────────────────
+#
+# 🔴 THE RESTART GUARD IS THE SAFETY ONE. The daemon requires mode == Normal to auto-restart
+# (cycle.rs should_auto_restart); this tier checked reason and the switch only. Latent while it ran
+# Normal Runs exclusively — a live water-safety bug the moment washdown exists, because a washdown
+# ending on its own timer would restart as ANOTHER washdown, uncapped, forever.
+lt_should_restart timer 1 normal   && check "restart: a Normal Run timer expiry restarts" "1" "1"
+lt_should_restart timer 1 washdown && check "restart: A WASHDOWN MUST NOT RESTART" "never" "reached" || \
+  check "restart: A WASHDOWN MUST NOT RESTART" "1" "1"
+lt_should_restart timer 1 tankfill && check "restart: a tank fill must not restart either" "never" "reached" || \
+  check "restart: a tank fill must not restart either" "1" "1"
+lt_should_restart timer 1 ""       && check "restart: a state file with no mode is a Normal Run" "1" "1"
+lt_should_restart volume_cap 1 normal && check "restart: a volume cap must not restart" "never" "reached" || \
+  check "restart: a volume cap must not restart" "1" "1"
+lt_should_restart timer 0 normal && check "restart: the switch still governs" "never" "reached" || \
+  check "restart: the switch still governs" "1" "1"
+
+# A washdown is TIME-ONLY: cap 0 disables the cutoff, so no volume can end it.
+out=$(lt_decide watering 1 999999 0 "" 10 300 5)
+check "washdown: no volume cuts a cap-less run" "none" "$out"
+out=$(lt_decide watering 0 999999 0 "" 300 300 0)
+check "washdown: it ends on its TIMER, whatever the volume" "ended:timer" "$out"
+
+# The ledger: a washdown contributes nothing but still rolls the day.
+_ldir=$(mktemp -d 2>/dev/null || echo /tmp/brvg-ldg.$$); mkdir -p "$_ldir"
+out=$(lt_ledger_apply washdown 500 2026-09-01 "$_ldir/l")
+check "ledger: a washdown adds nothing" "0.00" "$out"
+out=$(lt_ledger_apply normal 40 2026-09-01 "$_ldir/l")
+check "ledger: a Normal Run after it still counts from zero" "40.00" "$out"
+rm -rf "$_ldir"
