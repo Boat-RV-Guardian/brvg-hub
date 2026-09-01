@@ -14,6 +14,14 @@
 //! `plat`: where the daemon binary is, how to tell the service is installed, and how to start/stop
 //! it (an elevated `sc` on Windows, an `osascript` admin `launchctl` on macOS).
 
+// GUI SUBSYSTEM ON WINDOWS. Without this the tray links as a CONSOLE binary, so Windows opens a
+// terminal window every time it launches — at every sign-in, since the installer starts it from the
+// Run key. A notification-area monitor must be silent; this marks the PE as a GUI app so no console
+// is ever created. Ignored on macOS/Linux (it only affects the Windows PE). The trade: the handful
+// of `eprintln!` diagnostics below have nowhere to go on Windows — acceptable, because the user's
+// signal is the tray icon itself, and never popping a window is worth losing a few dev prints.
+#![windows_subsystem = "windows"]
+
 // Linux is neither: the daemon runs there (containers) but has no desktop tray. A stub keeps
 // `cargo build` honest on the Linux CI leg without making the whole crate desktop-only.
 #[cfg(not(any(windows, target_os = "macos")))]
