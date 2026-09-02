@@ -124,10 +124,11 @@ Function StartupPageLeave
     StrCpy $AutoStart "0"
   ${Else}
     StrCpy $AutoStart "1"
-  ; Default ON (owner, 2026-08-20). Its whole value is being present when something goes wrong,
-  ; and a monitor nobody opted into is a monitor nobody has.
-  StrCpy $Tray "1"
   ${EndIf}
+  ; The tray default (ON unless /NOTRAY, owner 2026-08-20) now lives in .onInit, which is also the
+  ; only place a SILENT install can honour it. It must NOT be re-asserted here: this function ran
+  ; AFTER reading the checkbox above, so forcing $Tray back to "1" in the auto-start branch (as it
+  ; used to) silently ignored a user who unchecked the tray but left auto-start on — the common case.
 FunctionEnd
 
 ; Silent installs never see the page, so read the flags here and default to auto-start.
@@ -140,6 +141,12 @@ Function .onInit
   StrCpy $INSTDIR "$APPDATA\BoatRVGuardian"
 
   StrCpy $AutoStart "1"
+  ; Default the tray ON, like AutoStart — the docs (top of file) say the monitor ships unless /NOTRAY
+  ; is passed. Without this default, a SILENT install (which never shows the startup page that would
+  ; otherwise set $Tray) left it empty, so the "$Tray == 1" section was skipped and silent installs
+  ; got no tray at all — the opposite of the documented default. The interactive page still overrides
+  ; this from the checkbox; /NOTRAY below still turns it off.
+  StrCpy $Tray "1"
   ${GetParameters} $R0
   ClearErrors
   ${GetOptions} $R0 "/NOTRAY" $R1
