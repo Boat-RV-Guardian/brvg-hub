@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,39 @@ const KEY_SYNC_SECS: u64 = 300;
 /// An unregistered hub polls the store at this cadence waiting for the bootstrap seed.
 const UNREGISTERED_POLL_SECS: u64 = 30;
 const HEARTBEAT_FLOOR_SECS: u64 = 15;
+
+// ── Report-by-exception heartbeat (scanning redesign, Phase 2) ──────────────────────────────────
+// The heartbeat is a LIVENESS + config-poll beat, NOT the alarm path: a flood or valve change
+// reaches the cloud immediately through the LinkTap poll loop and forward_shelly_to_cloud, and both
+// call note_activity() — which ALSO wakes this loop at once. So backing the beat off when nothing is
+// happening never delays an alarm; it only stops a parked, idle hub from beating 1440×/day for
+// nothing (and, post Phase-1a, from bumping its activity cursor that often).
+//
+// Three cadences by how long since the last local event (a valve/gateway report or a forwarded
+// sensor event):
+//   * ACTIVE  — within 2 min of an event: beat fast so the app/cloud track the situation live.
+//   * NORMAL  — within 10 min: the configured cadence (heartbeat_secs, floor 15 s).
+//   * QUIET   — idle beyond that: one beat every 20 min. Comfortably under the cloud's 60-min
+//               offline default (owner contract; connectivitySweep.DEFAULT_OFFLINE_MINS), with two
+//               beats of margin, so a healthy parked hub never reads as offline.
+const HEARTBEAT_ACTIVE_SECS: u64 = 20;
+const HEARTBEAT_QUIET_SECS: u64 = 20 * 60;
+const HEARTBEAT_ACTIVE_WINDOW_MS: i64 = 2 * 60 * 1000;
+const HEARTBEAT_NORMAL_WINDOW_MS: i64 = 10 * 60 * 1000;
+
+/// PURE: the next heartbeat interval, from how long since the last local event and the configured
+/// cadence. ACTIVE is never SLOWER than configured, QUIET never FASTER — so an operator who sets an
+/// unusually fast or slow `heartbeat_secs` is still respected as the baseline the modes bend around.
+fn heartbeat_interval_secs(idle_ms: i64, configured_secs: u64) -> u64 {
+    let normal = configured_secs.max(HEARTBEAT_FLOOR_SECS);
+    if idle_ms < HEARTBEAT_ACTIVE_WINDOW_MS {
+        HEARTBEAT_ACTIVE_SECS.min(normal)
+    } else if idle_ms < HEARTBEAT_NORMAL_WINDOW_MS {
+        normal
+    } else {
+        HEARTBEAT_QUIET_SECS.max(normal)
+    }
+}
 
 /// PURE: is this invocation the hub service? (`schtasks … "<exe>" --hub` — hub_service.rs.)
 pub fn hub_mode_requested<I: IntoIterator<Item = String>>(args: I) -> bool {
@@ -222,6 +256,23 @@ pub struct Rt {
     /// the update-check loop, read by the heartbeat (so the fleet console sees it) and by
     /// /api/hub/status (so the local app does). Visibility only; nothing here installs anything.
     pub update_available: tokio::sync::RwLock<Option<String>>,
+    /// Epoch ms of the last local event worth reporting (a valve/gateway report or a forwarded
+    /// sensor event). The heartbeat picks its cadence from how stale this is — recent ⇒ ACTIVE/
+    /// NORMAL, long-idle ⇒ QUIET (report-by-exception, Phase 2). Boot counts as activity so a fresh
+    /// hub starts responsive and settles to quiet on its own.
+    pub last_activity_ms: AtomicI64,
+    /// Rung by note_activity() the instant a local event happens, so the heartbeat loop breaks its
+    /// nap and beats NOW (in ACTIVE cadence) instead of after the current — possibly 20-minute —
+    /// interval. This is what makes quiet-mode backoff free of latency: the alarm path wakes it.
+    pub wake: tokio::sync::Notify,
+}
+
+/// Record that something happened locally and wake the heartbeat to report it immediately.
+/// Called from the telemetry/forward paths — never from the heartbeat itself, or it would keep
+/// itself perpetually ACTIVE.
+fn note_activity(rt: &Rt) {
+    rt.last_activity_ms.store(now_ms(), Ordering::Relaxed);
+    rt.wake.notify_one();
 }
 
 pub type Shared = Arc<Rt>;
@@ -237,6 +288,8 @@ pub fn new_rt(base: PathBuf, worker_base: String) -> Shared {
         linktap: tokio::sync::Mutex::new(None),
         valve_rev: tokio::sync::watch::channel(0u64).0,
         update_available: tokio::sync::RwLock::new(None),
+        last_activity_ms: AtomicI64::new(now_ms()),
+        wake: tokio::sync::Notify::new(),
     })
 }
 
@@ -1192,8 +1245,15 @@ async fn heartbeat_loop(rt: Shared) {
                 Ok(body) => apply_linktap_reply(&rt, &body).await,
                 Err(e) => crate::hlog!("hub: heartbeat failed: {e}"),
             }
-            let secs = u64::from(cfg.heartbeat_secs).max(HEARTBEAT_FLOOR_SECS);
-            tokio::time::sleep(Duration::from_secs(secs)).await;
+            // Report-by-exception cadence: fast right after a local event, the configured beat while
+            // things are recent, one beat every 20 min once idle. A local event mid-nap rings
+            // rt.wake and we beat immediately — so the backoff never costs alarm latency.
+            let idle = now_ms() - rt.last_activity_ms.load(Ordering::Relaxed);
+            let secs = heartbeat_interval_secs(idle, u64::from(cfg.heartbeat_secs));
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(secs)) => {}
+                _ = rt.wake.notified() => {}
+            }
         } else {
             tokio::time::sleep(Duration::from_secs(UNREGISTERED_POLL_SECS)).await;
         }
@@ -1652,6 +1712,10 @@ pub async fn linktap_flood_stop_all(rt: &Rt) {
 /// Best-effort, like every other outbound: a flood that cannot be forwarded has already had the
 /// valve closed locally, and blocking on the cloud would defeat the point of closing first.
 async fn forward_shelly_to_cloud(rt: &Rt, call: &ShellyCall) {
+    // A forwarded sensor event (a flood among them) is a local change — wake the heartbeat into
+    // ACTIVE cadence. The forward itself is what carries the alarm; this only makes the liveness
+    // beat track the situation too.
+    note_activity(rt);
     let cfg = hub_config::read_config_in(&rt.base);
     if cfg.shelly_secret.is_empty() || cfg.vid.is_empty() {
         // Unreachable in practice: an empty secret means the ingest refused this report long before
@@ -1684,6 +1748,9 @@ async fn forward_shelly_to_cloud(rt: &Rt, call: &ShellyCall) {
 /// Best-effort by design: telemetry that cannot be delivered must never block the valve logic that
 /// produced it.
 async fn spool_report(rt: &Rt, report: &crate::linktap_runtime::Report) {
+    // A report means the local state just changed — wake the heartbeat into ACTIVE cadence so the
+    // cloud/app track it live, even if the hub was in a 20-minute quiet nap.
+    note_activity(rt);
     let cfg = hub_config::read_config_in(&rt.base);
     if cfg.token.is_empty() || cfg.vid.is_empty() {
         return;
@@ -1977,6 +2044,33 @@ mod tests {
     use axum::extract::Query;
     use axum::Json;
     use std::collections::HashMap;
+
+    #[test]
+    fn heartbeat_backs_off_when_idle_and_speeds_up_after_an_event() {
+        let cfg = 60; // the default configured cadence
+                      // Just after a local event ⇒ ACTIVE (fast), but never slower than configured.
+        assert_eq!(heartbeat_interval_secs(0, cfg), HEARTBEAT_ACTIVE_SECS);
+        assert_eq!(heartbeat_interval_secs(HEARTBEAT_ACTIVE_WINDOW_MS - 1, cfg), HEARTBEAT_ACTIVE_SECS);
+        // Recent-ish ⇒ NORMAL (the configured beat).
+        assert_eq!(heartbeat_interval_secs(HEARTBEAT_ACTIVE_WINDOW_MS, cfg), 60);
+        assert_eq!(heartbeat_interval_secs(HEARTBEAT_NORMAL_WINDOW_MS - 1, cfg), 60);
+        // Long idle ⇒ QUIET (one beat every 20 min), still under the 60-min offline threshold.
+        assert_eq!(heartbeat_interval_secs(HEARTBEAT_NORMAL_WINDOW_MS, cfg), HEARTBEAT_QUIET_SECS);
+        assert!(HEARTBEAT_QUIET_SECS < 60 * 60, "quiet beat must stay under the 60-min offline default");
+    }
+
+    #[test]
+    fn heartbeat_respects_an_unusual_configured_cadence() {
+        // A very fast configured beat: ACTIVE is never SLOWER than it.
+        assert_eq!(heartbeat_interval_secs(0, 15), 15);
+        // A configured beat slower than QUIET: QUIET never FASTER than it, and NORMAL honors it.
+        let slow = 30 * 60; // 30 min
+        assert_eq!(heartbeat_interval_secs(HEARTBEAT_NORMAL_WINDOW_MS, slow), slow);
+        assert_eq!(heartbeat_interval_secs(HEARTBEAT_ACTIVE_WINDOW_MS, slow), slow);
+        // Below the floor is lifted to the floor.
+        assert_eq!(heartbeat_interval_secs(HEARTBEAT_NORMAL_WINDOW_MS, 5), HEARTBEAT_QUIET_SECS);
+        assert_eq!(heartbeat_interval_secs(HEARTBEAT_ACTIVE_WINDOW_MS, 5), HEARTBEAT_FLOOR_SECS);
+    }
 
     fn temp_base(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("brvg-hub-server-{}-{tag}", std::process::id()));
