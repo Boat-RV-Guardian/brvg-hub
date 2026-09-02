@@ -11,7 +11,7 @@
 
 [Unit]
 Description=Boat & RV Guardian hub
-Documentation=https://github.com/Boat-RV-Guardian/brvg-hub
+Documentation=https://github.com/DockNeighbor/DockNeighbor-Hub
 After=network-online.target
 Wants=network-online.target
 # If the swapped binary crash-loops, fail the unit rather than hammer forever (see StartLimit).

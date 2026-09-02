@@ -93,8 +93,19 @@ pub fn swap_paths(current: &std::path::Path) -> SwapPaths {
 }
 
 /// The base URL every release asset hangs off — the stable `latest` link the daemon family claims.
+///
+/// ⚠️ THE SLUG MOVED 2026-09-02: `Boat-RV-Guardian/brvg-hub` -> `DockNeighbor/DockNeighbor-Hub`
+/// (org renamed first, then the repo). Every hub already in the field has the OLD url compiled in
+/// and keeps working ONLY because GitHub redirects a renamed org and repo, and because this client
+/// follows redirects (reqwest's default). Verified after the rename: the old url still lands on the
+/// current tag page.
+///
+/// 🔴 SO THERE IS A STANDING RULE: NEVER CREATE A REPO AT THE OLD SLUG. GitHub retires a rename
+/// redirect the moment something claims the old name, and the day that happens every un-updated
+/// hub in the field silently loses its update path — no error anyone would see, just a hub that
+/// stops noticing new releases.
 pub const LATEST_DOWNLOAD_BASE: &str =
-    "https://github.com/Boat-RV-Guardian/brvg-hub/releases/latest/download";
+    "https://github.com/DockNeighbor/DockNeighbor-Hub/releases/latest/download";
 
 /// Outcome of an update attempt, for the caller's log and the HTTP reply.
 #[derive(Debug)]

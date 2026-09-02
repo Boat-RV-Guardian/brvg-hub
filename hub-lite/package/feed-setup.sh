@@ -21,7 +21,7 @@
 set -e
 
 FEED_NAME="brvg_hublite"
-FEED_URL="https://github.com/Boat-RV-Guardian/brvg-hub/releases/download/hub-lite-feed"
+FEED_URL="https://github.com/DockNeighbor/DockNeighbor-Hub/releases/download/hub-lite-feed"
 KEY_FINGERPRINT="b0ff2bec314c57d3"
 
 # The public key, verbatim from hub-lite/package/brvg-feed.pub. Two lines: the comment and the

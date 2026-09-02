@@ -3,10 +3,10 @@
   "name": "Boat & RV Guardian",
   "codeowners": ["@jgearinger"],
   "config_flow": true,
-  "documentation": "https://github.com/Boat-RV-Guardian/brvg-hub/tree/main/custom_components/boatrvguardian",
+  "documentation": "https://github.com/DockNeighbor/DockNeighbor-Hub/tree/main/custom_components/boatrvguardian",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/Boat-RV-Guardian/brvg-hub/issues",
+  "issue_tracker": "https://github.com/DockNeighbor/DockNeighbor-Hub/issues",
   "requirements": [],
   "version": "0.1.0"
 }

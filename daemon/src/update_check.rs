@@ -42,7 +42,7 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 }
 
 /// Extract the daemon version from the URL `releases/latest` redirected to, e.g.
-/// `https://github.com/Boat-RV-Guardian/brvg-hub/releases/tag/daemon-v0.3.24` → `0.3.24`.
+/// `https://github.com/DockNeighbor/DockNeighbor-Hub/releases/tag/daemon-v0.3.24` → `0.3.24`.
 /// Only the `daemon-v` family counts: a `hub-lite-feed` or any other tag returns None, so this can
 /// never mistake the feed release for a daemon version.
 pub fn version_from_release_url(url: &str) -> Option<String> {
@@ -58,8 +58,14 @@ pub fn newer_than(latest: &str, current: &str) -> Option<String> {
 
 /// The URL whose redirect names the latest daemon release. Public repo, no token — the same
 /// `releases/latest` link the installer follows.
+///
+/// ⚠️ Slug moved 2026-09-02 — see the note on `self_update::LATEST_DOWNLOAD_BASE`, including the
+/// standing rule never to create a repo at the old slug. `version_from_release_url` reads the tag
+/// out of whatever url the redirect lands on and ignores the org/repo path entirely, so the rename
+/// cannot confuse version detection; this constant is updated so NEW installs stop depending on a
+/// redirect at all.
 pub const LATEST_RELEASE_URL: &str =
-    "https://github.com/Boat-RV-Guardian/brvg-hub/releases/latest";
+    "https://github.com/DockNeighbor/DockNeighbor-Hub/releases/latest";
 
 /// Ask GitHub for the latest daemon version by following the `releases/latest` redirect and reading
 /// the tag out of the URL it landed on. Returns None on any network/parse failure — a hub that
@@ -112,17 +118,17 @@ mod tests {
     #[test]
     fn extracts_only_the_daemon_family_from_a_redirect_url() {
         assert_eq!(
-            version_from_release_url("https://github.com/Boat-RV-Guardian/brvg-hub/releases/tag/daemon-v0.3.24"),
+            version_from_release_url("https://github.com/DockNeighbor/DockNeighbor-Hub/releases/tag/daemon-v0.3.24"),
             Some("0.3.24".to_string()),
         );
         // The feed release must never be read as a daemon version.
         assert_eq!(
-            version_from_release_url("https://github.com/Boat-RV-Guardian/brvg-hub/releases/tag/hub-lite-feed"),
+            version_from_release_url("https://github.com/DockNeighbor/DockNeighbor-Hub/releases/tag/hub-lite-feed"),
             None,
         );
         // A URL that never redirected to a tag page (no /tag/ segment) yields nothing.
         assert_eq!(
-            version_from_release_url("https://github.com/Boat-RV-Guardian/brvg-hub/releases/latest"),
+            version_from_release_url("https://github.com/DockNeighbor/DockNeighbor-Hub/releases/latest"),
             None,
         );
     }
@@ -130,7 +136,7 @@ mod tests {
     #[test]
     fn end_to_end_shape() {
         let latest = version_from_release_url(
-            "https://github.com/Boat-RV-Guardian/brvg-hub/releases/tag/daemon-v0.3.24",
+            "https://github.com/DockNeighbor/DockNeighbor-Hub/releases/tag/daemon-v0.3.24",
         ).unwrap();
         assert_eq!(newer_than(&latest, "0.3.23"), Some("0.3.24".to_string()));
         assert_eq!(newer_than(&latest, "0.3.24"), None);

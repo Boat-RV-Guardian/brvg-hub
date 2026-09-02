@@ -16,7 +16,7 @@ point: the boat is usually somewhere you are not.
 
 ## Install
 
-**HACS** → Integrations → ⋮ → Custom repositories → add `Boat-RV-Guardian/brvg-hub` as an
+**HACS** → Integrations → ⋮ → Custom repositories → add `DockNeighbor/DockNeighbor-Hub` as an
 *Integration*, then install **Boat & RV Guardian** and restart Home Assistant.
 
 Then **Settings → Devices & Services → Add Integration → Boat & RV Guardian**, and paste your vehicle
