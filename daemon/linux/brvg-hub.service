@@ -1,0 +1,35 @@
+# The Rust hub as a Linux service — the systemd twin of the macOS LaunchDaemon
+# (daemon/macos/com.sc4tech.brvg-hub.plist) and the Windows service. A Pi or any bare Linux box that
+# runs the FULL daemon (convergence ruling, owner 2026-08-19) uses this.
+#
+# 🔴 Restart=always IS LOAD-BEARING, not hygiene. Remote self-update (daemon/src/self_update.rs)
+# works by swapping the binary and EXITING, trusting the supervisor to relaunch the new one — exactly
+# as macOS relies on the LaunchDaemon's KeepAlive. Without Restart=always here, a self-update on
+# Linux would replace the binary and then simply stop, leaving the hub down. The self-update's
+# pre-swap `--version` probe already refuses a binary that will not run, and systemd's start-limit
+# below is the backstop if a swapped binary runs `--version` but then crash-loops.
+
+[Unit]
+Description=Boat & RV Guardian hub
+Documentation=https://github.com/Boat-RV-Guardian/brvg-hub
+After=network-online.target
+Wants=network-online.target
+# If the swapped binary crash-loops, fail the unit rather than hammer forever (see StartLimit).
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Same layout as macOS: binary and config under one shared root (hub_config::shared_base = /var/lib,
+# DIR_NAME = BoatRVGuardian). Root-owned, so self-update can rename the binary in place — the same
+# reason the macOS pkg installs under a root-owned Application Support dir.
+ExecStart=/var/lib/BoatRVGuardian/bin/brvg-hub
+Restart=always
+RestartSec=2
+# Root, matching the macOS LaunchDaemon: the daemon owns /var/lib/BoatRVGuardian (config + the
+# binary it swaps on self-update). It binds 8722 (unprivileged), so root is for the writable
+# install root, not the port.
+User=root
+
+[Install]
+WantedBy=multi-user.target
