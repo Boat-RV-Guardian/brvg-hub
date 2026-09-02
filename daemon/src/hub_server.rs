@@ -529,9 +529,14 @@ async fn do_update(caller: &Caller) -> Answer {
         let client = http_client();
         match crate::self_update::perform_update(&client).await {
             crate::self_update::UpdateOutcome::Swapped { to_version } => {
-                crate::hlog!("hub: self-update installed {to_version}; exiting for the supervisor to relaunch");
-                // Give the HTTP reply a beat to flush before the process goes.
+                // Give the HTTP reply a beat to flush before anything restarts.
                 tokio::time::sleep(Duration::from_millis(500)).await;
+                // Windows: a detached `net stop`/`net start` bounces the service (it does not
+                // relaunch on a clean exit); this process is killed by that stop, so we do NOT exit
+                // ourselves. Unix: exit and let the supervisor relaunch from the swapped path.
+                let _restarting = crate::self_update::finalize_restart();
+                crate::hlog!("hub: self-update installed {to_version}; restarting into it");
+                #[cfg(unix)]
                 std::process::exit(0);
             }
             crate::self_update::UpdateOutcome::UpToDate => {
