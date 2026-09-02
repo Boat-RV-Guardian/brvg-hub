@@ -8,6 +8,16 @@
 // (that fails with error 1063), and the SCM launch must never fall through to the foreground path
 // (it would exit instantly, and the service would look like it crashed on start).
 fn main() {
+    // `--version` prints the version and exits — on EVERY platform, before anything starts. This is
+    // not cosmetic: the remote self-update (self_update.rs) proves a freshly downloaded binary
+    // actually runs on this box by executing `<new> --version` and reading it back BEFORE swapping.
+    // Without this the daemon would fall through to run_headless() and never exit, so that probe
+    // would hang forever and self-update would stall on its safety check. Must print a bare semver
+    // (update_check::parse_version reads it), so keep it exactly the crate version, nothing else.
+    if std::env::args().any(|a| a == "--version" || a == "-V") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     #[cfg(windows)]
     {
         if std::env::args().any(|a| a == "--service") {
