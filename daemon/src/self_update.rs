@@ -28,7 +28,7 @@
 /// The Windows service name the installer registers (daemon/windows/installer.nsi). The detached
 /// restarter bounces it by this exact name; a rename there must move here too.
 #[cfg(windows)]
-pub const WINDOWS_SERVICE_NAME: &str = "BoatRVGuardianHub";
+pub const WINDOWS_SERVICE_NAME: &str = "DockNeighborHub";
 
 /// The release asset for a platform+arch, or None if remote self-update is not supported there.
 /// Names mirror brvg-hub's daemon-release.yml exactly — a rename there must move here too.
@@ -344,7 +344,7 @@ ef1142ca3e7b8a87e7d606af5aca0b0ec1dec629ac8ba43bde75837bcf46da22  brvg-hub-macos
     #[test]
     fn swap_paths_are_siblings_so_the_rename_is_atomic() {
         let p = swap_paths(std::path::Path::new(
-            "/Library/Application Support/BoatRVGuardian/bin/brvg-hub",
+            "/Library/Application Support/DockNeighbor/bin/brvg-hub",
         ));
         assert_eq!(p.incoming.file_name().unwrap(), "brvg-hub.new");
         assert_eq!(p.previous.file_name().unwrap(), "brvg-hub.prev");

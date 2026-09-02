@@ -161,20 +161,20 @@ jobs:
       - name: Build the macOS installer pkg
         if: runner.os == 'macOS'
         # The pkg is the "separate installer" of the owner's 2026-08-19 ruling: payload under
-        # /Library/Application Support/BoatRVGuardian/bin (the same shared root the daemon's own
+        # /Library/Application Support/DockNeighbor/bin (the same shared root the daemon's own
         # config uses — root-owned, exactly what the app could never write and the service should),
         # plus a LaunchDaemon so it starts at boot before any login. UNSIGNED, like everything else
         # this project ships so far — macOS will warn on first open; right-click → Open works.
         run: |
           VER="${{ steps.ver.outputs.ver }}"
           ROOT=pkgroot
-          mkdir -p "$ROOT/Library/Application Support/BoatRVGuardian/bin" "$ROOT/Library/LaunchDaemons" "$ROOT/Library/LaunchAgents" scripts
-          cp "${{ matrix.artifact }}" "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub"
-          chmod 755 "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub"
+          mkdir -p "$ROOT/Library/Application Support/DockNeighbor/bin" "$ROOT/Library/LaunchDaemons" "$ROOT/Library/LaunchAgents" scripts
+          cp "${{ matrix.artifact }}" "$ROOT/Library/Application Support/DockNeighbor/bin/brvg-hub"
+          chmod 755 "$ROOT/Library/Application Support/DockNeighbor/bin/brvg-hub"
           # The tray binary sits beside the daemon; 755 so the logged-in user (the hub-lite runs as
           # them, not root) can execute it.
-          cp brvg-hub-tray "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub-tray"
-          chmod 755 "$ROOT/Library/Application Support/BoatRVGuardian/bin/brvg-hub-tray"
+          cp brvg-hub-tray "$ROOT/Library/Application Support/DockNeighbor/bin/brvg-hub-tray"
+          chmod 755 "$ROOT/Library/Application Support/DockNeighbor/bin/brvg-hub-tray"
           cp macos/com.sc4tech.brvg-hub.plist "$ROOT/Library/LaunchDaemons/"
           cp macos/com.sc4tech.brvg-hub-tray.plist "$ROOT/Library/LaunchAgents/"
           cp macos/postinstall scripts/

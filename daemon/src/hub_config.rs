@@ -22,7 +22,20 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Folder name under the platform's shared data directory.
-const DIR_NAME: &str = "BoatRVGuardian";
+///
+/// ⚠️ RENAMED 2026-09-02 (`BoatRVGuardian` -> `DockNeighbor`, owner ruling) AND IT IS A CONTRACT,
+/// not a label. Every one of these names the SAME directory and they must move together:
+///   * `daemon/windows/installer.nsi`     `DATA_DIR_NAME`
+///   * `daemon/macos/*.plist`             the LaunchDaemon/LaunchAgent program + log paths
+///   * `daemon/linux/install.sh`          `ROOT`, and `brvg-hub.service`'s `ExecStart`
+///   * `.github/workflows/daemon-release.yml`  the macOS pkg payload root
+///   * the APP's `dashboard/src-tauri/src/hub_service.rs`  `hub_bin_path()` + `hub_service_remove()`
+///
+/// 🔴 A MACHINE INSTALLED UNDER THE OLD NAME DOES NOT MIGRATE ITSELF. Its `hub.json` — hub id,
+/// member keys, the Shelly ingest secret, the LinkTap gateway/device ids — sits under the old
+/// directory, and a daemon on this version will not find it and will come up UNREGISTERED. Carrying
+/// that file across is a deliberate step in the cutover runbook, not something this code does.
+pub const DIR_NAME: &str = "DockNeighbor";
 const FILE_NAME: &str = "hub.json";
 
 /// Management API port (hub_server.rs). One constant, configurable per install because boats run
@@ -360,7 +373,7 @@ mod tests {
     #[test]
     fn config_lives_under_the_shared_folder_in_our_own_directory() {
         let p = config_path_in(Path::new("/shared"));
-        assert_eq!(p, PathBuf::from("/shared/BoatRVGuardian/hub.json"));
+        assert_eq!(p, PathBuf::from("/shared/DockNeighbor/hub.json"));
         // The real base must be a SHARED location, never a user profile — that is the whole point.
         let base = shared_base().to_string_lossy().to_string();
         assert!(!base.contains("/Users/"), "shared base must not be a user profile: {base}");

@@ -9,13 +9,13 @@
   <string>com.sc4tech.brvg-hub</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/Application Support/BoatRVGuardian/bin/brvg-hub</string>
+    <string>/Library/Application Support/DockNeighbor/bin/brvg-hub</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardErrorPath</key>
-  <string>/Library/Application Support/BoatRVGuardian/brvg-hub.log</string>
+  <string>/Library/Application Support/DockNeighbor/brvg-hub.log</string>
 </dict>
 </plist>

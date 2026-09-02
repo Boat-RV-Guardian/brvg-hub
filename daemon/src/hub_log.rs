@@ -34,7 +34,10 @@ static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 pub fn init(base: &Path) {
-    let dir = base.join("BoatRVGuardian").join("logs");
+    // The SAME directory name as the config (hub_config::DIR_NAME), not a second literal that
+    // agrees with it today: logs landing beside a config the daemon is not reading is precisely the
+    // split-brain this rename exists to end.
+    let dir = base.join(crate::hub_config::DIR_NAME).join("logs");
     if std::fs::create_dir_all(&dir).is_err() {
         return; // no log file; stderr still works, and nothing else changes
     }

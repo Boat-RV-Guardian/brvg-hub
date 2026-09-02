@@ -12,7 +12,7 @@
 set -eu
 
 REPO="Boat-RV-Guardian/brvg-hub"
-ROOT="/var/lib/BoatRVGuardian"
+ROOT="/var/lib/DockNeighbor"
 BIN="$ROOT/bin/brvg-hub"
 UNIT="/etc/systemd/system/brvg-hub.service"
 SRC="$(cd "$(dirname "$0")" && pwd)"

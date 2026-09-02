@@ -27,9 +27,9 @@ pub struct Observation {
     pub answering: bool,
     /// From the ping body — a hub can be running but not yet signed to a vehicle.
     pub registered: bool,
-    /// `%ProgramData%\BoatRVGuardian\bin\brvg-hub.exe` exists.
+    /// `%ProgramData%\DockNeighbor\bin\brvg-hub.exe` exists.
     pub binary_present: bool,
-    /// The `BoatRVGuardianHub` Windows service is registered (`sc query` succeeds). Named
+    /// The `DockNeighborHub` Windows service is registered (`sc query` succeeds). Named
     /// `service_present` since the 2026-08-20 conversion from a scheduled task — the field means
     /// "the persistence entry exists", and the quarantine signature below reads the same either way.
     pub service_present: bool,
