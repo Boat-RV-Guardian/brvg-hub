@@ -147,6 +147,24 @@ Function StartupPageLeave
   ; used to) silently ignored a user who unchecked the tray but left auto-start on — the common case.
 FunctionEnd
 
+; Put the PREVIOUS hub back after a failed upgrade.
+;
+; Every abort path in the install section calls this. We stop the legacy service on the way in to
+; free file locks, so any failure after that point would otherwise leave a machine that HAD a working
+; hub with a stopped one — an unmonitored boat produced by an installer that was only trying to
+; upgrade it. Best-effort and deliberately silent: on a machine that never carried a legacy service
+; every call here is a harmless no-op, and a failure to restore must not mask the real error the
+; caller is about to report.
+Function RestoreLegacyHub
+  Push $0
+  nsExec::ExecToLog 'sc.exe start "${LEGACY_SERVICE_NAME}"'
+  Pop $0
+  ${If} $0 == 0
+    DetailPrint "The previously installed hub has been restarted."
+  ${EndIf}
+  Pop $0
+FunctionEnd
+
 ; Silent installs never see the page, so read the flags here and default to auto-start.
 Function .onInit
   ; ProgramData, correctly. NSIS reaches it as $APPDATA under the "all users" shell context -- there
@@ -221,14 +239,23 @@ Section "Hub" SecHub
   ; come first and why the wait below is not optional.
   nsExec::ExecToLog 'sc.exe delete "${SERVICE_NAME}"'
   Pop $0
-  nsExec::ExecToLog 'sc.exe delete "${LEGACY_SERVICE_NAME}"'
-  Pop $0
+  ;
+  ; 🔴 THE LEGACY SERVICE IS **NOT** DELETED HERE, AND THAT ORDERING IS THE WHOLE POINT.
+  ;
+  ; It used to be, and it stranded the owner's boat on 2026-09-02. CENTRAL ran the legacy service;
+  ; this section stopped it, DELETED it, and then `File "brvg-hub.exe"` below hit a locked file and
+  ; took the `hub_locked` Abort — which exits BEFORE any service is registered. Net result: the
+  ; machine had no hub at all, and the only monitoring on a boat was gone until someone noticed.
+  ;
+  ; The rule this encodes: NEVER DESTROY THE ONLY WORKING PERSISTENCE ENTRY BEFORE ITS REPLACEMENT
+  ; EXISTS. Stopping the legacy service is necessary (it holds file locks); deleting it is not, and
+  ; deleting it early is what turns "the upgrade failed" — a safe no-op that leaves the previous hub
+  ; running — into "this vehicle is now unmonitored".
+  ;
+  ; So the delete moved to `retire_legacy` below, after the self-check has PROVEN the new service is
+  ; registered and running. Everything between here and there can now fail safely.
   nsExec::ExecToLog 'schtasks /Delete /F /TN "${LEGACY_TASK_NAME}"'
   Pop $0
-  ; The old identity's registry entries go with it, or Add/Remove Programs keeps offering to
-  ; uninstall a hub that no longer exists and a stale Run value points the tray at a deleted path.
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_SERVICE_NAME}"
-  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_SERVICE_NAME}Tray"
   Sleep 1500
 
   SetOutPath "$INSTDIR\bin"
@@ -239,10 +266,20 @@ Section "Hub" SecHub
   IfErrors hub_locked hub_written
   hub_locked:
     DetailPrint "ERROR: the hub program file is still in use and could not be replaced."
+    ; PUT THE OLD HUB BACK before giving up. We stopped it above to free file locks; if we cannot
+    ; complete the upgrade, the machine must be left as we found it — running the hub it had —
+    ; rather than stopped. Best-effort and silent: on a machine that never had a legacy service
+    ; this is a no-op, and its failure must not mask the real error being reported.
+    Call RestoreLegacyHub
     SetErrorLevel 2
-    Abort "A hub is still running and its program file could not be replaced. Stop it and run this installer again."
+    Abort "A hub is still running and its program file could not be replaced. Stop it and run this installer again.$\r$\nThe hub that was already installed has been left running."
   hub_written:
   SetOverwrite on
+
+  ; ⚠️ INITIALISED HERE, NOT IN THE VERIFY SECTION BELOW, and the order is load-bearing: `sc create`
+  ; now records its own failure cause into $Failures, and a later `StrCpy $Failures ""` would throw
+  ; that away and leave the user the causeless "the background service was not registered" again.
+  StrCpy $Failures ""
 
   DetailPrint "Registering the hub's background service..."
   ;
@@ -287,7 +324,12 @@ Section "Hub" SecHub
   nsExec::ExecToLog 'sc.exe create "${SERVICE_NAME}" binPath= "\$\"$INSTDIR\bin\brvg-hub.exe\$\" --service" start= $StartMode DisplayName= "${HUB_NAME}"'
   Pop $0
   ${If} $0 != 0
-    DetailPrint "WARNING: could not register the service (sc create exit $0)."
+    ; NOT just a DetailPrint. This is the one step that decides whether the hub runs at all, and its
+    ; exit code was being dropped — the self-check then reported the bare "the background service was
+    ; not registered" with no cause, which is what someone debugging CENTRAL had to work backwards
+    ; from. Carry the code into the failure the user is shown.
+    DetailPrint "ERROR: could not register the service (sc create exit $0)."
+    StrCpy $Failures "$Failures$\r$\n  - the background service could not be registered (sc create exit $0)"
   ${EndIf}
 
   ; The description is a separate call -- `sc create` has no parameter for it. Cosmetic, so a
@@ -351,7 +393,8 @@ Section "Hub" SecHub
   ; entry, which is a thing behavioural endpoint agents are built to notice however it is spelled.
   ; So do not trust the exit codes of tools an endpoint agent can neutralise underneath us. Look at
   ; the disk and the SCM and report what is ACTUALLY there.
-  StrCpy $Failures ""
+  ; NOT reset here — see the note at its initialisation above. Anything already recorded (a failed
+  ; `sc create`, with its exit code) must survive into the message the user is shown.
 
   IfFileExists "$INSTDIR\bin\brvg-hub.exe" check_service 0
     StrCpy $Failures "$Failures$\r$\n  - the hub program file is missing from $INSTDIR\bin"
@@ -384,8 +427,26 @@ Section "Hub" SecHub
     ${EndIf}
   ${EndIf}
 
+  ; ---- THE NEW HUB IS PROVEN. ONLY NOW IS IT SAFE TO RETIRE THE OLD IDENTITY -------------------
+  ;
+  ; Reached only when $Failures is empty, i.e. the binary is on disk, the service is registered AND
+  ; it actually started. Deleting the legacy service before this point is what stranded CENTRAL on
+  ; 2026-09-02 (see the note where the delete used to live).
+  ${If} $Failures == ""
+    nsExec::ExecToLog 'sc.exe stop "${LEGACY_SERVICE_NAME}"'
+    Pop $0
+    nsExec::ExecToLog 'sc.exe delete "${LEGACY_SERVICE_NAME}"'
+    Pop $0
+    ; The old identity's registry entries go with it, or Add/Remove Programs keeps offering to
+    ; uninstall a hub that no longer exists and a stale Run value points the tray at a deleted path.
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_SERVICE_NAME}"
+    DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_SERVICE_NAME}Tray"
+  ${EndIf}
+
   ${If} $Failures != ""
     DetailPrint "INSTALL FAILED -- see the message below."
+    ; Same rule as `hub_locked`: a failed install leaves the machine with the hub it started with.
+    Call RestoreLegacyHub
     ; Exit code 3 = installed nothing usable. Distinct from 2 (could not replace a running hub) so
     ; the app can tell "try again later" apart from "something on this machine refused us".
     SetErrorLevel 3
