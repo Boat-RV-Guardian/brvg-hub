@@ -49,13 +49,13 @@ mod plat {
         /// The Windows service name — MUST match the daemon's `win_service.rs` SERVICE_NAME and the
         /// app's `hub_service.rs` SERVICE_NAME. A mismatch means the tray reports on, and
         /// starts/stops, a service nobody else is managing.
-        const SERVICE_NAME: &str = "BoatRVGuardianHub";
+        const SERVICE_NAME: &str = "DockNeighborHub";
         /// Keeps every helper process from flashing a console window every 15 seconds.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
         pub fn hub_binary_path() -> PathBuf {
             PathBuf::from(std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".into()))
-                .join("BoatRVGuardian")
+                .join("DockNeighbor")
                 .join("bin")
                 .join("brvg-hub.exe")
         }
@@ -102,7 +102,7 @@ mod plat {
         const PLIST: &str = "/Library/LaunchDaemons/com.sc4tech.brvg-hub.plist";
 
         pub fn hub_binary_path() -> PathBuf {
-            PathBuf::from("/Library/Application Support/BoatRVGuardian/bin/brvg-hub")
+            PathBuf::from("/Library/Application Support/DockNeighbor/bin/brvg-hub")
         }
 
         /// The plist is world-readable, so its presence answers "is the hub installed" with no

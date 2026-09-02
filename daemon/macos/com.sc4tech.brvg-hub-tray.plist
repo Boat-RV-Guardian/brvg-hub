@@ -17,7 +17,7 @@
   <string>com.sc4tech.brvg-hub-tray</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Library/Application Support/BoatRVGuardian/bin/brvg-hub-tray</string>
+    <string>/Library/Application Support/DockNeighbor/bin/brvg-hub-tray</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

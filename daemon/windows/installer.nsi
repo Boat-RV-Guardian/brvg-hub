@@ -36,13 +36,29 @@ Unicode true
 ;     never reports RUNNING, and the SCM kills it.
 ;   * SERVICE_NAME in the APP's dashboard/src-tauri/src/hub_service.rs -- that is what `sc query`s
 ;     to draw the Hub screen. Wrong here and the app manages a service the daemon never answers.
-!define SERVICE_NAME "BoatRVGuardianHub"
+!define SERVICE_NAME "DockNeighborHub"
 !define SERVICE_DESC "Carries this vehicle's local work - gateway telemetry, local control and cloud reporting - even when nobody is signed in."
 
 ; The scheduled task this installer used to create, kept ONLY so an upgrade removes it. A machine
 ; that still carries it would otherwise end up with two persistence entries fighting over port
 ; 8722. New installs never create a task.
+;
+; ⚠️ THIS NAMES HISTORY, SO IT DOES NOT MOVE WITH ${SERVICE_NAME}. No machine ever carried a
+; scheduled task called "DockNeighborHub"; renaming this turns the cleanup into a silent no-op and
+; leaves exactly the two-persistence-entries state it exists to prevent.
 !define LEGACY_TASK_NAME "BoatRVGuardianHub"
+
+; And the SERVICE by its former name -- the same reasoning one layer up. Every hub installed before
+; 2026-09-02 runs as "BoatRVGuardianHub"; installing ${SERVICE_NAME} over it without removing it
+; leaves TWO services racing for port 8722, and the survivor is the old binary still reporting to
+; the retired api.boatrvguardian.com. Silenced everywhere -- a fresh machine never had one.
+!define LEGACY_SERVICE_NAME "BoatRVGuardianHub"
+
+; The shared data directory, under $APPDATA in all-users context (== C:\ProgramData).
+; ⚠️ MUST equal DIR_NAME in daemon/src/hub_config.rs and the app's hub_bin_path(); the legacy one is
+; kept so an upgrade can clear the old tree out. Renamed with the service, 2026-09-02.
+!define DATA_DIR_NAME "DockNeighbor"
+!define LEGACY_DATA_DIR_NAME "BoatRVGuardian"
 
 Name "${HUB_NAME}"
 OutFile "brvg-hub-windows-setup.exe"
@@ -50,8 +66,8 @@ OutFile "brvg-hub-windows-setup.exe"
 ; SYSTEM. There is no per-user variant to offer, so the installer simply requires admin.
 RequestExecutionLevel admin
 ; NO InstallDir HERE. $PROGRAMDATA IS NOT AN NSIS CONSTANT -- see .onInit, which sets $INSTDIR the
-; only way that actually works. Writing InstallDir "$PROGRAMDATA\BoatRVGuardian" compiles with a
-; warning, drops the unknown token, and silently installs to \BoatRVGuardian on the current drive.
+; only way that actually works. Writing InstallDir "$PROGRAMDATA\${DATA_DIR_NAME}" compiles with a
+; warning, drops the unknown token, and silently installs to \DockNeighbor on the current drive.
 ShowInstDetails show
 SetCompressor /SOLID lzma
 
@@ -138,7 +154,7 @@ Function .onInit
   ; machine-wide by definition (RequestExecutionLevel admin, a LocalSystem service), so every shell folder
   ; it touches should be the machine-wide one.
   SetShellVarContext all
-  StrCpy $INSTDIR "$APPDATA\BoatRVGuardian"
+  StrCpy $INSTDIR "$APPDATA\${DATA_DIR_NAME}"
 
   StrCpy $AutoStart "1"
   ; Default the tray ON, like AutoStart — the docs (top of file) say the monitor ships unless /NOTRAY
@@ -174,13 +190,17 @@ Section "Hub" SecHub
   ; File cannot overwrite it and the install fails at its very first instruction.
   ;
   ; Measured on CENTRAL, 2026-08-19, with the task in state Running:
-  ;   [System.IO.File]::OpenWrite("C:\ProgramData\BoatRVGuardian\bin\brvg-hub.exe")
+  ;   [System.IO.File]::OpenWrite("C:\ProgramData\DockNeighbor\bin\brvg-hub.exe")
   ;   -> "The process cannot access the file ... because it is being used by another process."
   DetailPrint "Stopping any hub that is already running..."
   nsExec::ExecToLog 'sc.exe stop "${SERVICE_NAME}"'
   Pop $0
-  ; And the LEGACY scheduled task, on a machine upgrading from the pre-service hub. It holds the
-  ; same binary open, and leaving it would give the machine two things trying to run one hub.
+  ; And BOTH legacy persistence entries, on a machine upgrading from an older hub: the service
+  ; under its former name (pre-2026-09-02) and the scheduled task from before the service existed.
+  ; Each holds the same binary open, and each left behind would give the machine two things trying
+  ; to run one hub on port 8722 -- with the old one still reporting to the retired API host.
+  nsExec::ExecToLog 'sc.exe stop "${LEGACY_SERVICE_NAME}"'
+  Pop $0
   nsExec::ExecToLog 'schtasks /End /TN "${LEGACY_TASK_NAME}"'
   Pop $0
 
@@ -201,8 +221,14 @@ Section "Hub" SecHub
   ; come first and why the wait below is not optional.
   nsExec::ExecToLog 'sc.exe delete "${SERVICE_NAME}"'
   Pop $0
+  nsExec::ExecToLog 'sc.exe delete "${LEGACY_SERVICE_NAME}"'
+  Pop $0
   nsExec::ExecToLog 'schtasks /Delete /F /TN "${LEGACY_TASK_NAME}"'
   Pop $0
+  ; The old identity's registry entries go with it, or Add/Remove Programs keeps offering to
+  ; uninstall a hub that no longer exists and a stale Run value points the tray at a deleted path.
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_SERVICE_NAME}"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_SERVICE_NAME}Tray"
   Sleep 1500
 
   SetOutPath "$INSTDIR\bin"
@@ -242,7 +268,7 @@ Section "Hub" SecHub
   ; not a convenience.
   ;
   ; ⚠️ THE `\$\"` IS A DOUBLE ESCAPE AND BOTH HALVES ARE NECESSARY. The registered binPath must be
-  ;   "C:\ProgramData\BoatRVGuardian\bin\brvg-hub.exe" --service
+  ;   "C:\ProgramData\DockNeighbor\bin\brvg-hub.exe" --service
   ; quotes included, so that the SCM splits the program from its argument. Getting there needs a
   ; literal BACKSLASH-QUOTE on sc.exe's command line, because sc's value is itself wrapped in quotes
   ; and the C runtime's argv parser would otherwise eat the inner pair -- `binPath= ""path" --service"`
@@ -251,7 +277,7 @@ Section "Hub" SecHub
   ; which needs no escaping), and the two MUST agree.
   ;
   ; This survives on a path with no spaces even when it is wrong, which is exactly why it is spelled
-  ; out here: $INSTDIR is C:\ProgramData\BoatRVGuardian today, and the day it is not, an unquoted
+  ; out here: $INSTDIR is C:\ProgramData\DockNeighbor today, and the day it is not, an unquoted
   ; binPath registers a service that can never start.
   ${If} $AutoStart == "1"
     StrCpy $StartMode "auto"
@@ -385,7 +411,7 @@ Section "Hub" SecHub
 
     ; HKLM, not HKCU -- owner ruling: "for the taskbar, all users like the hub". Every account that
     ; logs in gets the icon, which matches a hub that is machine-wide.
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BoatRVGuardianHubTray" '"$INSTDIR\bin\brvg-hub-tray.exe"'
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${SERVICE_NAME}Tray" '"$INSTDIR\bin\brvg-hub-tray.exe"'
 
     ; Start it now rather than making the user log out to see it. VIA EXPLORER ON PURPOSE: this
     ; installer is elevated, and a child of an elevated process is elevated too -- an elevated tray
@@ -395,17 +421,18 @@ Section "Hub" SecHub
     Exec '"$WINDIR\explorer.exe" "$INSTDIR\bin\brvg-hub-tray.exe"'
   ${Else}
     ; Declining on a re-install must actually REMOVE it, not just skip adding it.
-    DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BoatRVGuardianHubTray"
+    DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${SERVICE_NAME}Tray"
+    DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_SERVICE_NAME}Tray"
     nsExec::ExecToLog 'taskkill /F /IM brvg-hub-tray.exe'
     Pop $0
     Delete "$INSTDIR\bin\brvg-hub-tray.exe"
   ${EndIf}
 
   WriteUninstaller "$INSTDIR\uninstall-hub.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "DisplayName" "${HUB_NAME}"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "UninstallString" '"$INSTDIR\uninstall-hub.exe"'
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "Publisher" "SC4 Tech"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}" "DisplayName" "${HUB_NAME}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}" "UninstallString" '"$INSTDIR\uninstall-hub.exe"'
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}" "Publisher" "SC4 Tech"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}" "InstallLocation" "$INSTDIR"
 SectionEnd
 
 ; Shared by the uninstaller and /UNINSTALL. Removes the service, the binary AND the hub's config --
@@ -413,7 +440,7 @@ SectionEnd
 ; worse than removing it. Revoking that credential cloud-side is the app's job, separately.
 Function RemoveEverything
   ; $APPDATA under the all-users context set in .onInit == C:\ProgramData. This function previously
-  ; used $PROGRAMDATA, which does not exist: every path below resolved to \BoatRVGuardian\... on the
+  ; used $PROGRAMDATA, which does not exist: every path below resolved to \DockNeighbor\... on the
   ; current drive, so `/S /UNINSTALL` -- the path the APP drives -- reported success and deleted
   ; NOTHING. hub.json holds a cloud credential, which makes that a leak rather than untidiness.
   SetShellVarContext all
@@ -423,10 +450,15 @@ Function RemoveEverything
   Sleep 1500
   nsExec::ExecToLog 'sc.exe delete "${SERVICE_NAME}"'
   Pop $0
-  ; The legacy scheduled task too: a machine that installed a hub before 2026-08-27 carries one,
-  ; and an uninstall that leaves a SYSTEM boot entry pointing at a deleted binary is worse than no
-  ; uninstall at all. Silenced -- most machines never had one.
+  ; Both legacy persistence entries too -- the service under its former name (a hub installed
+  ; before 2026-09-02) and the scheduled task (before 2026-08-27). An uninstall that leaves a SYSTEM
+  ; boot entry pointing at a deleted binary is worse than no uninstall at all. Silenced -- most
+  ; machines never had either.
+  nsExec::ExecToLog 'sc.exe stop "${LEGACY_SERVICE_NAME}"'
+  Pop $0
   nsExec::ExecToLog 'schtasks /End /TN "${LEGACY_TASK_NAME}"'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete "${LEGACY_SERVICE_NAME}"'
   Pop $0
   nsExec::ExecToLog 'schtasks /Delete /F /TN "${LEGACY_TASK_NAME}"'
   Pop $0
@@ -436,15 +468,24 @@ Function RemoveEverything
   ; a running monitor polling a hub that no longer exists, are both worse than nothing.
   nsExec::ExecToLog 'taskkill /F /IM brvg-hub-tray.exe'
   Pop $0
-  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BoatRVGuardianHubTray"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${SERVICE_NAME}Tray"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_SERVICE_NAME}Tray"
   nsExec::ExecToLog 'taskkill /F /IM brvg-hub.exe /T'
   Pop $0
   Sleep 1500
-  RMDir /r "$APPDATA\BoatRVGuardian\bin"
-  Delete "$APPDATA\BoatRVGuardian\hub.json"
-  Delete "$APPDATA\BoatRVGuardian\uninstall-hub.exe"
-  RMDir "$APPDATA\BoatRVGuardian"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub"
+  RMDir /r "$APPDATA\${DATA_DIR_NAME}\bin"
+  Delete "$APPDATA\${DATA_DIR_NAME}\hub.json"
+  Delete "$APPDATA\${DATA_DIR_NAME}\uninstall-hub.exe"
+  RMDir "$APPDATA\${DATA_DIR_NAME}"
+  ; ⚠️ THE PRE-2026-09-02 TREE ($APPDATA\${LEGACY_DATA_DIR_NAME}) IS DELIBERATELY LEFT ALONE.
+  ; It is tempting to clear it here on the same argument used just above -- hub.json holds a cloud
+  ; credential -- but during the rename cutover that file is the ONLY copy of a working hub's
+  ; identity (hub id, member keys, the Shelly ingest secret, the LinkTap gateway/device ids), and
+  ; carrying it across is a step in the migration runbook. An uninstaller that raced ahead of that
+  ; step would destroy the thing the migration exists to preserve. Clearing the old tree is a
+  ; separate, deliberate act once the migration is confirmed -- an owner decision, not a default.
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_SERVICE_NAME}"
 FunctionEnd
 
 Section "Uninstall"
@@ -453,8 +494,13 @@ Section "Uninstall"
   Sleep 1500
   nsExec::ExecToLog 'sc.exe delete "${SERVICE_NAME}"'
   Pop $0
-  ; And the legacy scheduled task, for a machine upgraded from the pre-service hub.
+  ; And both legacy persistence entries, for a machine upgraded from an older hub: the service under
+  ; its former name, and the scheduled task from before the service existed.
+  nsExec::ExecToLog 'sc.exe stop "${LEGACY_SERVICE_NAME}"'
+  Pop $0
   nsExec::ExecToLog 'schtasks /End /TN "${LEGACY_TASK_NAME}"'
+  Pop $0
+  nsExec::ExecToLog 'sc.exe delete "${LEGACY_SERVICE_NAME}"'
   Pop $0
   nsExec::ExecToLog 'schtasks /Delete /F /TN "${LEGACY_TASK_NAME}"'
   Pop $0
@@ -464,7 +510,8 @@ Section "Uninstall"
   ; a running monitor polling a hub that no longer exists, are both worse than nothing.
   nsExec::ExecToLog 'taskkill /F /IM brvg-hub-tray.exe'
   Pop $0
-  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "BoatRVGuardianHubTray"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${SERVICE_NAME}Tray"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "${LEGACY_SERVICE_NAME}Tray"
   nsExec::ExecToLog 'taskkill /F /IM brvg-hub.exe /T'
   Pop $0
   Sleep 1500
@@ -472,5 +519,6 @@ Section "Uninstall"
   Delete "$INSTDIR\hub.json"
   Delete "$INSTDIR\uninstall-hub.exe"
   RMDir "$INSTDIR"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\BoatRVGuardianHub"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACY_SERVICE_NAME}"
 SectionEnd

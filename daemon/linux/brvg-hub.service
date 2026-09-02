@@ -21,12 +21,12 @@ StartLimitBurst=5
 [Service]
 Type=simple
 # Same layout as macOS: binary and config under one shared root (hub_config::shared_base = /var/lib,
-# DIR_NAME = BoatRVGuardian). Root-owned, so self-update can rename the binary in place — the same
+# DIR_NAME = DockNeighbor). Root-owned, so self-update can rename the binary in place — the same
 # reason the macOS pkg installs under a root-owned Application Support dir.
-ExecStart=/var/lib/BoatRVGuardian/bin/brvg-hub
+ExecStart=/var/lib/DockNeighbor/bin/brvg-hub
 Restart=always
 RestartSec=2
-# Root, matching the macOS LaunchDaemon: the daemon owns /var/lib/BoatRVGuardian (config + the
+# Root, matching the macOS LaunchDaemon: the daemon owns /var/lib/DockNeighbor (config + the
 # binary it swaps on self-update). It binds 8722 (unprivileged), so root is for the writable
 # install root, not the port.
 User=root

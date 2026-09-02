@@ -29,7 +29,7 @@ use windows_service::{define_windows_service, service_dispatcher};
 /// hub_service.rs uses for every `sc` verb — a mismatch means the app manages a service the SCM
 /// launched under a different name, the same class of bug as the auto-start box reading one thing
 /// while the toggle wrote another.
-pub const SERVICE_NAME: &str = "BoatRVGuardianHub";
+pub const SERVICE_NAME: &str = "DockNeighborHub";
 
 /// OWN_PROCESS: this binary hosts exactly one service, itself. Not SHARE_PROCESS (svchost-style),
 /// which we are not, and reporting the wrong type makes the SCM's own accounting wrong.
