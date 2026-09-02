@@ -42,7 +42,7 @@ export function loadConfig(env: Record<string, string | undefined>): HubConfig {
   const vid = (env.VID || '').trim();
   const deviceId = (env.DEVICE_ID || '').trim();
   const token = (env.DEVICE_TOKEN || '').trim();
-  const workerBase = (env.WORKER_URL || 'https://api.boatrvguardian.com').trim();
+  const workerBase = (env.WORKER_URL || 'https://api.dockneighbor.com').trim();
 
   if (!vid) throw new ConfigError('VID is required (the vehicle this hub reports into).');
   if (!deviceId) throw new ConfigError('DEVICE_ID is required (this hub’s device id in the vehicle).');

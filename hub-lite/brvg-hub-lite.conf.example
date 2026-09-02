@@ -14,7 +14,7 @@ DEVICE_TOKEN=""
 VEHICLE_KEY=""
 
 # Hosted worker. Must be https.
-WORKER_URL="https://api.boatrvguardian.com"
+WORKER_URL="https://api.dockneighbor.com"
 
 # Cadences (seconds). Floors: GPS 30, modem 60. These ride the customer's metered link —
 # every tick is one small HTTPS GET.

@@ -38,7 +38,7 @@ describe('loadConfig', () => {
     expect(() => loadConfig({})).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, WORKER_URL: 'http://insecure' })).toThrow(/https/);
     const c = loadConfig(base);
-    expect(c.workerBase).toBe('https://api.boatrvguardian.com');
+    expect(c.workerBase).toBe('https://api.dockneighbor.com');
     expect(c.port).toBe(8181);
     expect(c.drainIntervalSec).toBe(120);
   });

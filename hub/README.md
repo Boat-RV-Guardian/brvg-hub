@@ -48,7 +48,7 @@ Config is environment variables (enroll the hub in the app to mint `DEVICE_TOKEN
 | `VID` | ✓ | — |
 | `DEVICE_ID` | ✓ | — |
 | `DEVICE_TOKEN` | ✓ | — |
-| `WORKER_URL` | | `https://api.boatrvguardian.com` (must be https) |
+| `WORKER_URL` | | `https://api.dockneighbor.com` (must be https) |
 | `RECEIVER_PORT` | | `8181` |
 | `DRAIN_INTERVAL` | | `120` (floor 30) |
 | `KEYFRAME_EVERY` | | `6` |

@@ -44,7 +44,15 @@ use crate::cycle;
 
 /// Production worker base — the Rust twin of DEFAULT_WORKER_URL (configSync.ts). Pinned for the
 /// same reason as the TS side: this process holds a credential, so it talks only to first party.
-const WORKER_BASE: &str = "https://api.boatrvguardian.com";
+///
+/// ⚠️ COMPILE-TIME ONLY, AND THAT IS THE MIGRATION COST. There is no env or config override (see
+/// `new_rt`, the sole construction site) — deliberately, because a hub that could be pointed at an
+/// arbitrary base by whoever can write its config would hand a device token to that base. So a
+/// change of host is a RELEASE plus a self-update on every deployed hub, not a config edit. The
+/// 2026-09-02 boatrvguardian -> dockneighbor cutover is exactly that: an already-deployed daemon
+/// keeps talking to the old host until it takes a build newer than this one, which is why
+/// api.boatrvguardian.com stays declared in brvg-cloud-server's wrangler.toml routes.
+const WORKER_BASE: &str = "https://api.dockneighbor.com";
 
 const KEY_HEADER: &str = "x-brvg-key";
 /// Key refresh cadence — this IS the revocation latency until the WS push channel exists.
