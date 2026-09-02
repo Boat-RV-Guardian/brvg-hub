@@ -308,7 +308,7 @@ CONF="${BRVG_HUB_LITE_CONF:-/etc/brvg-hub-lite.conf}"
 load_config() {
   # shellcheck disable=SC1090
   [ -f "$CONF" ] && . "$CONF"
-  WORKER_URL="${WORKER_URL:-https://api.boatrvguardian.com}"
+  WORKER_URL="${WORKER_URL:-https://api.dockneighbor.com}"
   GPS_INTERVAL="${GPS_INTERVAL:-120}"
   MODEM_INTERVAL="${MODEM_INTERVAL:-600}"
   [ "$GPS_INTERVAL" -lt 30 ] && GPS_INTERVAL=30       # floors: a metered link is not a firehose

@@ -17,7 +17,10 @@ CONF_VID: Final = "vid"
 CONF_TOKEN: Final = "token"
 CONF_HOST: Final = "host"
 
-DEFAULT_HOST: Final = "https://api.boatrvguardian.com"
+# ⚠️ THE DEFAULT ONLY REACHES NEW CONFIG ENTRIES. Home Assistant stores `host` in the entry data at
+# setup time, so an integration configured before the 2026-09-02 dockneighbor cutover keeps talking
+# to api.boatrvguardian.com until its entry is re-created (or reconfigured) with this value.
+DEFAULT_HOST: Final = "https://api.dockneighbor.com"
 
 # The cloud reports the plan's telemetry resolution on every response, and polling faster returns
 # identical data — so the coordinator follows what the server says rather than a number chosen here.
