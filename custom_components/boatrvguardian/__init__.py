@@ -1,4 +1,4 @@
-"""The Boat & RV Guardian integration."""
+"""The DockNeighbor integration."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: BrvgConfigEntry) -> bool
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, entry.data[CONF_VID])},
         name=str(vehicle.get("name") or entry.data[CONF_VID]),
-        manufacturer="Boat & RV Guardian",
+        manufacturer="DockNeighbor",
         model=str(vehicle.get("vehicleType") or "vehicle"),
     )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -82,7 +82,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         if data.get("scope") != SCOPE_CONTROL:
             raise ServiceValidationError(
                 "This vehicle's token may not open the valve. Create a new token with the "
-                '"open and close" scope in the Boat & RV Guardian app.'
+                '"open and close" scope in the DockNeighbor app.'
             )
         if not (data.get("valve") or {}).get("present"):
             raise ServiceValidationError("This vehicle has no valve to open.")

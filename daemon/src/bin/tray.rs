@@ -247,10 +247,10 @@ mod tray_impl {
 
     fn tooltip(state: Icon) -> &'static str {
         match state {
-            Icon::Ok => "Boat & RV Guardian hub — watching this vehicle",
-            Icon::NeedsSigning => "Boat & RV Guardian hub — running, but not signed to a vehicle",
-            Icon::Bad => "Boat & RV Guardian hub — NOT running. This vehicle is not being watched.",
-            Icon::Absent => "Boat & RV Guardian hub — not installed on this computer",
+            Icon::Ok => "DockNeighbor hub — watching this vehicle",
+            Icon::NeedsSigning => "DockNeighbor hub — running, but not signed to a vehicle",
+            Icon::Bad => "DockNeighbor hub — NOT running. This vehicle is not being watched.",
+            Icon::Absent => "DockNeighbor hub — not installed on this computer",
         }
     }
 

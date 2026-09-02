@@ -10,7 +10,7 @@
 # below is the backstop if a swapped binary runs `--version` but then crash-loops.
 
 [Unit]
-Description=Boat & RV Guardian hub
+Description=DockNeighbor hub
 Documentation=https://github.com/DockNeighbor/DockNeighbor-Hub
 After=network-online.target
 Wants=network-online.target

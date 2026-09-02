@@ -1,6 +1,6 @@
-# Boat & RV Guardian — on-site collectors, and the Home Assistant integration
+# DockNeighbor — on-site collectors, and the Home Assistant integration
 
-The on-site half of [Boat & RV Guardian](https://boatrvguardian.com): small collectors that run on
+The on-site half of [DockNeighbor](https://dockneighbor.com): small collectors that run on
 the vessel or RV, gather local sensor and GPS telemetry on the LAN, and report it to the Guardian
 cloud in one batched roll-up per interval — alarms immediately, never batched.
 
@@ -37,7 +37,7 @@ Windows scheduled task or a macOS LaunchDaemon — see `daemon/windows/installer
 ## Five ways to deploy a collector
 
 The same contract runs everywhere a collector can live. Solid borders are runnable today from this
-repo; dashed ones are on the [public roadmap](https://www.boatrvguardian.com/roadmap).
+repo; dashed ones are on the [public roadmap](https://www.dockneighbor.com/roadmap).
 
 ![1 — Hub on a Raspberry Pi or Docker box behind any router](docs/diagrams/s1-hub-box.svg)
 

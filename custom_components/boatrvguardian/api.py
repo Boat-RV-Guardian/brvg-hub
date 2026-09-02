@@ -1,4 +1,4 @@
-"""Thin client for the Boat & RV Guardian cloud read API.
+"""Thin client for the DockNeighbor cloud read API.
 
 Home Assistant talks to the CLOUD and to nothing else (owner ruling, 2026-08-20): it sits at a house
 or an office watching a REMOTE vehicle, and never touches the boat's network, its hub, or its

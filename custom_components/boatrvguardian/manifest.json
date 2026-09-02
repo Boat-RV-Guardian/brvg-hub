@@ -1,6 +1,6 @@
 {
   "domain": "boatrvguardian",
-  "name": "Boat & RV Guardian",
+  "name": "DockNeighbor",
   "codeowners": ["@jgearinger"],
   "config_flow": true,
   "documentation": "https://github.com/DockNeighbor/DockNeighbor-Hub/tree/main/custom_components/boatrvguardian",

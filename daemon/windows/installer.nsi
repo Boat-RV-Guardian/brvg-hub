@@ -25,7 +25,7 @@ Unicode true
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
 
-!define HUB_NAME "Boat & RV Guardian Hub"
+!define HUB_NAME "DockNeighbor Hub"
 
 ; THE HUB IS A REAL WINDOWS SERVICE, NOT A SCHEDULED TASK (owner ruling 2026-08-20: "i want you to
 ; build it as a service no matter what, i don't like it as a scheduled task").
@@ -397,7 +397,7 @@ Section "Hub" SecHub
     ; Defender-only Win 11 machine 2026-08-19 (Proxmox VM 107) -- installed cleanly, hub answered,
     ; zero detections. Naming that spares the user hunting through Defender when their actual
     ; blocker is a third-party product.
-    Abort "The hub was NOT installed.$\r$\n$Failures$\r$\n$\r$\nWHY THIS HAPPENS$\r$\nThe hub watches your boat or RV while nobody is aboard, so it has to start with the computer, before anyone signs in. Security software cannot tell that apart from a program trying to hide itself, so some products block it. Windows Defender allows it -- if you are seeing this, it is usually a third-party antivirus.$\r$\n$\r$\nHOW TO FIX IT$\r$\n1. Open your antivirus or endpoint protection.$\r$\n2. Find its quarantine, history, or recent events, and look for an item named brvg-hub or a blocked service.$\r$\n3. Choose Allow, Restore, or Trust for that item.$\r$\n4. Run this installer again.$\r$\n$\r$\nIf you would rather not allow it, the hub simply will not run on this computer. Nothing else about Boat & RV Guardian is affected -- the app still works, it just cannot monitor while you are away."
+    Abort "The hub was NOT installed.$\r$\n$Failures$\r$\n$\r$\nWHY THIS HAPPENS$\r$\nThe hub watches your boat or RV while nobody is aboard, so it has to start with the computer, before anyone signs in. Security software cannot tell that apart from a program trying to hide itself, so some products block it. Windows Defender allows it -- if you are seeing this, it is usually a third-party antivirus.$\r$\n$\r$\nHOW TO FIX IT$\r$\n1. Open your antivirus or endpoint protection.$\r$\n2. Find its quarantine, history, or recent events, and look for an item named brvg-hub or a blocked service.$\r$\n3. Choose Allow, Restore, or Trust for that item.$\r$\n4. Run this installer again.$\r$\n$\r$\nIf you would rather not allow it, the hub simply will not run on this computer. Nothing else about DockNeighbor is affected -- the app still works, it just cannot monitor while you are away."
   ${EndIf}
 
   ; ---- THE NOTIFICATION-AREA MONITOR -----------------------------------------------------------

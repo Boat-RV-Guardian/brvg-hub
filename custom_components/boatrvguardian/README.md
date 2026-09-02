@@ -1,25 +1,25 @@
-# Boat & RV Guardian for Home Assistant
+# DockNeighbor for Home Assistant
 
 Watch your boat or RV from the Home Assistant instance at your house — flood and bilge sensors,
 shore power, batteries, temperature, switches — wherever the vessel actually is.
 
-This integration talks to the Boat & RV Guardian **cloud**. Home Assistant does not need to be
+This integration talks to the DockNeighbor **cloud**. Home Assistant does not need to be
 aboard, does not join the vessel's network, and does not talk to the sensors directly. That is the
 point: the boat is usually somewhere you are not.
 
 ## Requirements
 
 - Home Assistant 2025.2 or newer
-- A Boat & RV Guardian account with a vehicle on **any paid plan** (Dockside, the free plan, does not
+- A DockNeighbor account with a vehicle on **any paid plan** (Dockside, the free plan, does not
   include integrations)
 - An integration token, created in the app
 
 ## Install
 
 **HACS** → Integrations → ⋮ → Custom repositories → add `DockNeighbor/DockNeighbor-Hub` as an
-*Integration*, then install **Boat & RV Guardian** and restart Home Assistant.
+*Integration*, then install **DockNeighbor** and restart Home Assistant.
 
-Then **Settings → Devices & Services → Add Integration → Boat & RV Guardian**, and paste your vehicle
+Then **Settings → Devices & Services → Add Integration → DockNeighbor**, and paste your vehicle
 id and integration token.
 
 ## What you get
