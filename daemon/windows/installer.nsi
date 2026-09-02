@@ -262,6 +262,26 @@ Section "Hub" SecHub
   ; `try` so a still-locked binary sets the error flag instead of throwing NSIS's own abort/retry
   ; dialog, which is unanswerable during a /S silent install driven by the app.
   SetOverwrite try
+  ;
+  ; 🔴 CLEARERRORS IS LOAD-BEARING. `IfErrors` below is asked "did the File just now fail?", but the
+  ; NSIS error flag is GLOBAL and STICKY — it is set by any earlier instruction that failed and is
+  ; only cleared by an `IfErrors` that reads it. Several instructions above set it ROUTINELY on a
+  ; healthy machine: `DeleteRegKey`/`DeleteRegValue` set it when the key or value is simply ABSENT,
+  ; and `SetOutPath` sets it if it has to create the directory tree.
+  ;
+  ; MEASURED ON CENTRAL, 2026-09-02, twice. A `/S` install exited 2 — `hub_locked`, "the hub program
+  ; file is still in use" — while the binary had in fact been written correctly and no hub was
+  ; running at all. The second time was on a COMPLETELY CLEAN box: no legacy service, no existing
+  ; service, empty ProgramData, nothing to lock anything. The abort was a FALSE POSITIVE reading a
+  ; stale flag left by the legacy-registry cleanup, which had nothing to delete.
+  ;
+  ; That false positive is what made the #104 ordering bug destructive rather than merely untidy:
+  ; the installer had already removed the machine's only working hub, then aborted on a failure that
+  ; had not happened. Two defects, and only together do they explain an unmonitored boat.
+  ;
+  ; So: clear it immediately before the operation whose result is about to be tested. Never assume
+  ; the flag reflects the last thing you did.
+  ClearErrors
   File "brvg-hub.exe"
   IfErrors hub_locked hub_written
   hub_locked:
