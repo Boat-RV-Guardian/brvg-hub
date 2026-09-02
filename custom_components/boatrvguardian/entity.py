@@ -23,7 +23,7 @@ class BrvgEntity(CoordinatorEntity[BrvgCoordinator]):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{vid}:{device_id}")},
             name=device_id,
-            manufacturer="Boat & RV Guardian",
+            manufacturer="DockNeighbor",
             model=str((coordinator.data or {}).get("vehicleType") or "vehicle"),
             via_device=(DOMAIN, vid),
         )
@@ -55,6 +55,6 @@ class BrvgVehicleEntity(CoordinatorEntity[BrvgCoordinator]):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._vid)},
             name=str(data.get("name") or "Vehicle"),
-            manufacturer="Boat & RV Guardian",
+            manufacturer="DockNeighbor",
             model=str(data.get("vehicleType") or "vehicle"),
         )

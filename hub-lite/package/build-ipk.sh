@@ -59,8 +59,8 @@ Version: $VERSION
 Depends: libc, curl, uhttpd
 Section: net
 Architecture: $ARCH
-Maintainer: Boat & RV Guardian
-Description: Reports GPS and modem telemetry to Boat & RV Guardian, so the vehicle
+Maintainer: DockNeighbor
+Description: Reports GPS and modem telemetry to DockNeighbor, so the vehicle
  keeps reporting when nobody has the app open aboard.
 EOF
 

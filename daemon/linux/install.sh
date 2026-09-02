@@ -11,7 +11,7 @@
 
 set -eu
 
-REPO="Boat-RV-Guardian/brvg-hub"
+REPO="DockNeighbor/DockNeighbor-Hub"
 ROOT="/var/lib/DockNeighbor"
 BIN="$ROOT/bin/brvg-hub"
 UNIT="/etc/systemd/system/brvg-hub.service"

@@ -2,8 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "Boat & RV Guardian",
-        "description": "Create an integration token in the Boat & RV Guardian app, then paste it here along with the vehicle id it belongs to.",
+        "title": "DockNeighbor",
+        "description": "Create an integration token in the DockNeighbor app, then paste it here along with the vehicle id it belongs to.",
         "data": {
           "vid": "Vehicle ID",
           "token": "Integration token",
@@ -20,7 +20,7 @@
     },
     "error": {
       "invalid_auth": "That token was rejected. Check it belongs to this vehicle, and that it has not been rotated or revoked.",
-      "cannot_connect": "Could not reach the Boat & RV Guardian cloud.",
+      "cannot_connect": "Could not reach the DockNeighbor cloud.",
       "plan_excluded": "This vehicle's plan does not include an integration. Integrations are available on every paid plan.",
       "rate_limited": "Asked too soon — this plan allows one read per its telemetry interval. Wait a moment and try again."
     },

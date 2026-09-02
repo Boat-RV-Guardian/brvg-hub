@@ -1,4 +1,4 @@
-"""Constants for the Boat & RV Guardian integration.
+"""Constants for the DockNeighbor integration.
 
 The vocabulary here is SERVED by the cloud, not defined here: `kind` and `category` arrive on every
 device in the API response precisely so this component never re-implements the worker's event

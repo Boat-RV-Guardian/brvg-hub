@@ -4,7 +4,7 @@
 # Config lives in /etc/brvg-hub.env (VID=…, DEVICE_ID=…, DEVICE_TOKEN=…, WORKER_URL=…), 0600.
 
 [Unit]
-Description=Boat & RV Guardian hub
+Description=DockNeighbor hub
 After=network-online.target
 Wants=network-online.target
 

@@ -93,8 +93,39 @@ pub fn swap_paths(current: &std::path::Path) -> SwapPaths {
 }
 
 /// The base URL every release asset hangs off — the stable `latest` link the daemon family claims.
+///
+/// ⚠️ THE SLUG MOVED 2026-09-02: `Boat-RV-Guardian/brvg-hub` -> `DockNeighbor/DockNeighbor-Hub`
+/// (org renamed first, then the repo). Every hub already in the field has the OLD url compiled in
+/// and keeps working ONLY because GitHub redirects both renames, and because this client follows
+/// redirects (reqwest's default).
+///
+/// 🔴 THAT RESOLUTION RESTS ON **TWO SEPARATE REDIRECT RECORDS, AND BOTH ARE LOAD-BEARING.**
+/// Measured 2026-09-02:
+/// ```text
+///   Boat-RV-Guardian/brvg-hub          301 -> DockNeighbor/DockNeighbor-Hub   (org record)
+///   DockNeighbor/brvg-hub              301 -> DockNeighbor/DockNeighbor-Hub   (repo record)
+///   Boat-RV-Guardian/DockNeighbor-Hub  404      <- proves it is NOT an org-wide alias:
+///                                                  the org record is keyed to owner+repo PAIRS
+///   .../releases/latest/download/SHA256SUMS  200 through to the release-assets CDN
+/// ```
+///
+/// So the standing rule has TWO clauses, and breaking EITHER one silently kills the update path for
+/// every hub still carrying the old url — no error anyone would see, just a hub that quietly stops
+/// noticing releases:
+///
+///   1. **Never let anything claim the org name `Boat-RV-Guardian`.** It is currently a 404, i.e.
+///      UNREGISTERED AND AVAILABLE TO ANY STRANGER — an unmitigated third-party risk, live right
+///      now, that closes only when the field devices stop using the old url.
+///   2. **Never create a repo named `brvg-hub` under `DockNeighbor`** — not as a placeholder, an
+///      archive, or a mirror. That is the innocent-looking one, because it needs no stranger.
+///
+/// ⚠️ AND YOU CANNOT DEFEND CLAUSE 1 BY REGISTERING THE OLD ORG YOURSELF: occupying the name breaks
+/// the redirect by exactly the same mechanism as a stranger doing it. THERE IS NO PROTECTIVE SQUAT.
+/// The only real fix is getting the old url off the devices — see
+/// `sc4-internal/docs/DEVICE-MIGRATION-DOCKNEIGHBOR-API-2026-09-02.md` (§3.1a for the compiled-in
+/// copy on a hub, §3.2a for the router's opkg feed, which is plain text and needs no release).
 pub const LATEST_DOWNLOAD_BASE: &str =
-    "https://github.com/Boat-RV-Guardian/brvg-hub/releases/latest/download";
+    "https://github.com/DockNeighbor/DockNeighbor-Hub/releases/latest/download";
 
 /// Outcome of an update attempt, for the caller's log and the HTTP reply.
 #[derive(Debug)]

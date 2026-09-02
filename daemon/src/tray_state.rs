@@ -69,18 +69,18 @@ pub fn alert_text(a: Alert) -> (&'static str, &'static str) {
     match a {
         Alert::RemovedBySecuritySoftware => (
             "The hub was removed",
-            "Your security software has removed the Boat & RV Guardian hub, so this vehicle is no \
+            "Your security software has removed the DockNeighbor hub, so this vehicle is no \
              longer being watched. Open your antivirus, find the blocked or quarantined item named \
              brvg-hub, and choose Allow or Restore. Then reinstall the hub.",
         ),
         Alert::Stopped => (
             "The hub has stopped",
-            "The Boat & RV Guardian hub is installed but not running, so this vehicle is not being \
+            "The DockNeighbor hub is installed but not running, so this vehicle is not being \
              watched. Use Start hub from this menu, or restart the computer.",
         ),
         Alert::Recovered => (
             "The hub is running again",
-            "Boat & RV Guardian is watching this vehicle again.",
+            "DockNeighbor is watching this vehicle again.",
         ),
     }
 }
@@ -88,9 +88,16 @@ pub fn alert_text(a: Alert) -> (&'static str, &'static str) {
 /// Escape a string for use as WINDOWS MENU text.
 ///
 /// Windows menus treat `&` as the accelerator marker: it is swallowed and the next character gets
-/// underlined. Our product name contains one, so the tray menu rendered "Boat  RV Guardian hub"
-/// with a hole in it while the TOOLTIP — which has no mnemonics — showed it correctly. Caught in a
-/// screenshot from CENTRAL, 2026-08-20.
+/// underlined. The product name USED to contain one, so the tray menu rendered "Boat  RV Guardian
+/// hub" with a hole in it while the TOOLTIP — which has no mnemonics — showed it correctly. Caught
+/// in a screenshot from CENTRAL, 2026-08-20.
+///
+/// ⚠️ THE 2026-09-02 REBRAND TO "DockNeighbor" REMOVED THE AMPERSAND FROM THE PRODUCT NAME, AND
+/// THAT IS NOT A REASON TO DELETE THIS. It only means the ORIGINAL trigger can no longer fire; the
+/// hazard moved rather than went away. Menu text still interpolates strings this code does not
+/// choose — a vehicle name like "Bow & Stern" reaches a menu the same way the product name did, and
+/// would lose its ampersand identically. The regression that is now structurally impossible is one
+/// instance of the bug, not the bug.
 ///
 /// It lives HERE rather than in the tray binary for the reason that file states about itself: the
 /// Windows half only compiles in CI, so anything that can be tested should not live there. The bug
@@ -446,13 +453,30 @@ mod tests {
     }
 
     #[test]
-    fn menu_text_escapes_the_ampersand_in_our_own_product_name() {
-        // The exact string that rendered as "Boat  RV Guardian hub" in the tray menu on CENTRAL.
+    fn menu_text_escapes_every_ampersand_it_is_given() {
+        // The original regression: the product name held an '&' and the menu ate it, rendering
+        // "Boat  RV Guardian hub" on CENTRAL. That exact string is now historical — the 2026-09-02
+        // rebrand removed the ampersand — so it is asserted here as the HISTORICAL case rather than
+        // as today's product name, which is what keeps the regression covered without pretending
+        // the brand still contains one.
         assert_eq!(
             for_menu("Boat & RV Guardian hub — watching this vehicle"),
             "Boat && RV Guardian hub — watching this vehicle"
         );
+
+        // 🔴 AND THE LIVE CASE, which is why this test did not simply get deleted with the brand.
+        // Menu text interpolates strings this code does not choose. A vehicle named "Bow & Stern"
+        // reaches the menu exactly as the product name did and loses its ampersand identically.
+        assert_eq!(for_menu("Bow & Stern — watching this vehicle"),
+                   "Bow && Stern — watching this vehicle");
+        assert_eq!(for_menu("A & B & C"), "A && B && C");
+
         // Every tooltip feeds the menu, so every one of them must survive the trip.
+        //
+        // ⚠️ THIS LOOP ALONE IS NOT A TEST ANY MORE, and saying so is the point: no current tooltip
+        // contains an '&', so both sides are 0 and it would pass with for_menu() gutted to the
+        // identity function. It is kept because it still guards the DAY A TOOLTIP GAINS ONE, and the
+        // assertions above are what actually exercise the escaping today.
         for i in [Icon::Ok, Icon::NeedsSigning, Icon::Bad, Icon::Absent] {
             let raw = tooltip_for_test(i);
             let escaped = for_menu(raw);
@@ -469,10 +493,10 @@ mod tests {
     /// Windows-only binary, and a test that cannot run is not a test.
     fn tooltip_for_test(i: Icon) -> &'static str {
         match i {
-            Icon::Ok => "Boat & RV Guardian hub — watching this vehicle",
-            Icon::NeedsSigning => "Boat & RV Guardian hub — running, but not signed to a vehicle",
-            Icon::Bad => "Boat & RV Guardian hub — NOT running. This vehicle is not being watched.",
-            Icon::Absent => "Boat & RV Guardian hub — not installed on this computer",
+            Icon::Ok => "DockNeighbor hub — watching this vehicle",
+            Icon::NeedsSigning => "DockNeighbor hub — running, but not signed to a vehicle",
+            Icon::Bad => "DockNeighbor hub — NOT running. This vehicle is not being watched.",
+            Icon::Absent => "DockNeighbor hub — not installed on this computer",
         }
     }
 

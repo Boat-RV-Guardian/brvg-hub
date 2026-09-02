@@ -1,1 +1,1 @@
-"""Tests for the Boat & RV Guardian integration."""
+"""Tests for the DockNeighbor integration."""

@@ -30,7 +30,7 @@ index, and publishes to a single **rolling GitHub release tagged `hub-lite-feed`
 latest, so it never touches the `latest` link the daemon release claims). Routers point opkg at:
 
 ```
-src/gz brvg_hublite https://github.com/Boat-RV-Guardian/brvg-hub/releases/download/hub-lite-feed
+src/gz brvg_hublite https://github.com/DockNeighbor/DockNeighbor-Hub/releases/download/hub-lite-feed
 ```
 
 a stable URL whose `Packages.gz` / `Packages.sig` the workflow overwrites each release. Both install
