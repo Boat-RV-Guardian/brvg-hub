@@ -60,7 +60,7 @@ pub fn newer_than(latest: &str, current: &str) -> Option<String> {
 /// `releases/latest` link the installer follows.
 ///
 /// ⚠️ Slug moved 2026-09-02 — see the note on `self_update::LATEST_DOWNLOAD_BASE`, including the
-/// standing rule never to create a repo at the old slug. `version_from_release_url` reads the tag
+/// TWO-clause standing rule (never claim the old org, never create `brvg-hub` under the new one). `version_from_release_url` reads the tag
 /// out of whatever url the redirect lands on and ignores the org/repo path entirely, so the rename
 /// cannot confuse version detection; this constant is updated so NEW installs stop depending on a
 /// redirect at all.
