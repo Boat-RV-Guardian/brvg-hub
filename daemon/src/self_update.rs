@@ -1,4 +1,4 @@
-//! Remote self-update for the daemon hub (phase 1b).
+//! Remote self-update for the daemon hub (phases 1b Unix + 1c Windows).
 //!
 //! Phase 1a made the gap VISIBLE (the hub reports when a newer release exists). This closes it: the
 //! hub can install that release itself, triggered remotely, so a Pi or Mac hub on a boat behind
@@ -17,9 +17,18 @@
 //! ROLLBACK. The previous binary is kept alongside as `.prev`. `restore_previous` swaps it back —
 //! the local undo for a hub nobody can reach, mirroring hub-lite's `/etc/brvg-hub-lite.prev`.
 //!
-//! WINDOWS IS NOT HERE (phase 1c). A running .exe cannot be replaced on Windows without a helper
-//! that swaps it after this process exits; until that exists, `asset_for` returns None on windows
-//! and the update path refuses cleanly, leaving the app's local installer as the Windows route.
+//! WINDOWS (phase 1c) works differently in two ways, both handled below. (1) A running `.exe` CANNOT
+//! be opened for write, but it CAN be RENAMED while running — Windows permits moving a locked image
+//! within its volume — so the same rename-based swap applies. (2) A Windows service does not relaunch
+//! on a clean exit and cannot cleanly stop-then-start itself in-process, so the restart is handed to
+//! a DETACHED `net stop`/`net start` that outlives this process; `net stop` is synchronous, so the
+//! start never races the stop. Everything else — download, verify, `--version` probe, `.prev`
+//! rollback — is shared with Unix.
+
+/// The Windows service name the installer registers (daemon/windows/installer.nsi). The detached
+/// restarter bounces it by this exact name; a rename there must move here too.
+#[cfg(windows)]
+pub const WINDOWS_SERVICE_NAME: &str = "BoatRVGuardianHub";
 
 /// The release asset for a platform+arch, or None if remote self-update is not supported there.
 /// Names mirror brvg-hub's daemon-release.yml exactly — a rename there must move here too.
@@ -28,7 +37,8 @@ pub fn asset_for(os: &str, arch: &str) -> Option<&'static str> {
         ("macos", _) => Some("brvg-hub-macos-universal"), // one universal binary serves both arches
         ("linux", "x86_64") => Some("brvg-hub-linux-x64"),
         ("linux", "aarch64") => Some("brvg-hub-linux-arm64"),
-        // Windows: a running .exe can't replace itself in place — phase 1c.
+        ("windows", "x86_64") => Some("brvg-hub-windows-x64.exe"),
+        // No build for anything else (windows-arm64, linux-riscv, …) — refuse rather than guess.
         _ => None,
     }
 }
@@ -89,7 +99,8 @@ pub const LATEST_DOWNLOAD_BASE: &str =
 /// Outcome of an update attempt, for the caller's log and the HTTP reply.
 #[derive(Debug)]
 pub enum UpdateOutcome {
-    /// The binary was replaced; the process is about to exit for the supervisor to relaunch it.
+    /// The binary was replaced; the caller now restarts into it (Unix: exit for the supervisor;
+    /// Windows: a detached net stop/start bounces the service).
     Swapped { to_version: String },
     /// Nothing to do — already current.
     UpToDate,
@@ -213,6 +224,39 @@ pub async fn perform_update(client: &reqwest::Client) -> UpdateOutcome {
     }
 }
 
+/// Bring the newly-swapped binary into service. The mechanism is per-platform:
+///
+/// - **Unix**: a no-op. The caller exits and the supervisor (launchd `KeepAlive`, systemd
+///   `Restart=always`) relaunches from the replaced path.
+/// - **Windows**: a service does NOT relaunch on a clean exit, and a service cannot cleanly
+///   stop-then-start ITSELF in-process. So hand the bounce to a DETACHED `cmd` that outlives this
+///   process — it waits a beat for the update reply to flush, then `net stop` (synchronous, so it
+///   fully stops — and kills this process) and `net start` (which launches the swapped exe). The
+///   restarter is spawned DETACHED + in its own process group so `net stop` killing the daemon does
+///   not take the restarter down with it. Returns whether the restarter was launched.
+#[cfg(windows)]
+pub fn finalize_restart() -> bool {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let cmdline = format!(
+        "timeout /t 2 /nobreak >nul & net stop {svc} & net start {svc}",
+        svc = WINDOWS_SERVICE_NAME
+    );
+    std::process::Command::new("cmd")
+        .args(["/c", &cmdline])
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .is_ok()
+}
+
+/// Unix: nothing to do here — the caller exits and the supervisor relaunches. Present so the call
+/// site is platform-agnostic.
+#[cfg(not(windows))]
+pub fn finalize_restart() -> bool {
+    false
+}
+
 /// Roll back to the `.prev` binary kept by the last successful swap. The local undo for a hub nobody
 /// can reach. Returns Ok(()) once .prev is back in place (the caller then exits to relaunch it).
 pub fn restore_previous() -> Result<(), String> {
@@ -239,7 +283,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn asset_names_match_the_release_workflow_and_windows_is_declined() {
+    fn asset_names_match_the_release_workflow_across_platforms() {
         assert_eq!(
             asset_for("macos", "aarch64"),
             Some("brvg-hub-macos-universal")
@@ -250,7 +294,8 @@ mod tests {
         );
         assert_eq!(asset_for("linux", "x86_64"), Some("brvg-hub-linux-x64"));
         assert_eq!(asset_for("linux", "aarch64"), Some("brvg-hub-linux-arm64"));
-        assert_eq!(asset_for("windows", "x86_64"), None); // phase 1c
+        assert_eq!(asset_for("windows", "x86_64"), Some("brvg-hub-windows-x64.exe")); // 1c
+        assert_eq!(asset_for("windows", "aarch64"), None); // no windows-arm64 build
         assert_eq!(asset_for("linux", "riscv64"), None); // no build for it
     }
 
