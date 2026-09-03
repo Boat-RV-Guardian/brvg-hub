@@ -26,7 +26,7 @@
 # told to update and WHEN (staged rollout). The previous hub-lite is kept and automatically restored
 # if the new one cannot even report its own version.
 
-HUB_LITE_VERSION="0.14.7"
+HUB_LITE_VERSION="0.14.8"
 HUB_LITE_BACKUP="/etc/brvg-hub-lite.prev"
 
 # The LAST telemetry this hub-lite composed, as JSON, for the LAN management door to serve
@@ -781,6 +781,9 @@ self_update() {
   _self=$(hub_lite_path)
   # Keep the running hub-lite so a bad release is one command (or one failed smoke check) from undone.
   cp "$_self" "$HUB_LITE_BACKUP" 2>/dev/null && chmod 0644 "$HUB_LITE_BACKUP" 2>/dev/null
+  # What we are running BEFORE opkg touches anything — the only reliable way to tell an actual
+  # upgrade from a no-op. See the restart guard below.
+  _before=$("$_self" --version 2>/dev/null)
 
   # opkg verifies the feed's usign signature itself; --no-check-certificate and friends are
   # deliberately NOT used. A feed that fails its signature check simply does not install.
@@ -799,7 +802,23 @@ self_update() {
     restore_hub_lite "failed smoke check"
     return 1
   fi
-  log "self_update: installed $("$_self" --version 2>/dev/null); restarting"
+  # 🔴 ONLY RESTART IF THE VERSION ACTUALLY MOVED.
+  #
+  # `opkg upgrade <pkg>` EXITS 0 WHEN THE PACKAGE IS ALREADY CURRENT — it has nothing to do and
+  # says so successfully. So the exit status above cannot distinguish "upgraded" from "nothing to
+  # do", and this function used to log "installed <same version>; restarting" and bounce the
+  # collector anyway. Measured on sc4-lab 2026-09-03, on a router already at 0.14.7.
+  #
+  # That is not cosmetic. The operator console has a per-hub FORCE UPDATE button (and a fleet
+  # rollout is meant to sweep every device), so pressing it on a fleet that is already current
+  # would restart every router's collector for no reason — a small silent gap on each one, caused
+  # by an update that did nothing.
+  _after=$("$_self" --version 2>/dev/null)
+  if [ "$_before" = "$_after" ]; then
+    log "self_update: already current ($_after) — nothing installed, not restarting"
+    return 0
+  fi
+  log "self_update: installed $_after (was ${_before:-unknown}); restarting"
   [ -x /etc/init.d/brvg-hub-lite ] && (sleep 2; /etc/init.d/brvg-hub-lite restart) >/dev/null 2>&1 &
   return 0
 }
