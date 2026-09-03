@@ -12,8 +12,9 @@
 # self_update pulls from — is done by .github/workflows/hub-lite-feed.yml on a hub-lite-v* tag; see
 # hub-lite/package/README.md for the feed URL and the one owner step (the signing secret).
 #
-# ipk format: an ar archive of debian-binary + control.tar.gz + data.tar.gz. No OpenWrt SDK, no
-# cross-compiler: the hub-lite is POSIX shell, so the "build" is packaging.
+# ipk format: a GZIPPED TAR of debian-binary + control.tar.gz + data.tar.gz (NOT an ar archive —
+# that is .deb; see the sealing block below). No OpenWrt SDK, no cross-compiler: the hub-lite is
+# POSIX shell, so the "build" is packaging.
 
 set -eu
 
@@ -94,8 +95,16 @@ chmod 0755 "$WORK/control/prerm"
 
 echo "2.0" > "$WORK/debian-binary"
 
-( cd "$WORK/data" && tar czf "$WORK/data.tar.gz" . )
-( cd "$WORK/control" && tar czf "$WORK/control.tar.gz" . )
+# ⚠️ EVERY TAR HERE IS ustar, AND ON macOS AppleDouble IS SUPPRESSED. busybox tar — which is what
+# opkg uses on the router — cannot read pax extended headers, and macOS `tar` writes them BY
+# DEFAULT. A package built on a Mac otherwise installs as a pile of `PaxHeader/...` and `._...`
+# entries with `get_header_tar: Unknown typeflag: 0x78`, having unpacked none of the real files.
+# Measured on sc4-lab, 2026-09-03. CI builds on Ubuntu and would not have shown this, which is
+# exactly why the flag belongs in the script rather than in the runner.
+TAR_OPTS="--format=ustar"
+export COPYFILE_DISABLE=1
+( cd "$WORK/data" && tar $TAR_OPTS -czf "$WORK/data.tar.gz" . )
+( cd "$WORK/control" && tar $TAR_OPTS -czf "$WORK/control.tar.gz" . )
 
 # Verify the payload before sealing it: an empty or short package installs "successfully" and
 # leaves the router with no hub-lite, which is the failure mode worth catching here rather than on
@@ -111,28 +120,37 @@ tar tzf "$WORK/control.tar.gz" | grep -q './control' || { echo "control archive 
 IPK="$OUT/${PKG}_${VERSION}_${ARCH}.ipk"
 rm -f "$IPK"
 
-# The ar archive is written BY HAND rather than shelling out to `ar`, for two reasons found the
-# hard way: CI runners don't necessarily ship binutils (`ar: not found`), and macOS `ar` needs
-# `-S` or it treats the members as object files and emits a 96-byte archive containing only a
-# symbol table — a "package" that installs nothing. The format is trivial and this keeps the
-# script's promise of needing no toolchain at all.
-#   header: "!<arch>\n", then per member a 60-byte record
-#   (name16 mtime12 uid6 gid6 mode8 size10 0x60 0x0A) followed by data padded to even length.
-ar_add() {
-  _f="$2"
-  _name=$(basename "$_f")
-  _size=$(wc -c < "$_f" | tr -d ' ')
-  printf '%-16s%-12s%-6s%-6s%-8s%-10s\140\n' "$_name" 0 0 0 100644 "$_size" >> "$1"
-  cat "$_f" >> "$1"
-  [ $(( _size % 2 )) -eq 1 ] && printf '\n' >> "$1"
-  return 0
-}
+# 🔴 AN OPENWRT .ipk IS A GZIPPED TAR, NOT AN `ar` ARCHIVE. That distinction is the whole of this
+# block, and getting it wrong is why no router has ever installed this package from the feed.
+#
+# .deb is ar. .ipk is tar.gz. This script built an ar for its entire life — the comment here even
+# asserted "ipk format: an ar archive", confidently and wrongly — and opkg's answer to it is
+# `pkg_init_from_file: Malformed package file`. Measured against a real OpenWrt package on
+# 2026-09-03: rpcd_..._mips_24kc.ipk begins `1f 8b` (gzip) and unpacks to ./debian-binary,
+# ./data.tar.gz, ./control.tar.gz. Ours began `!<arch>`.
+#
+# ⚠️ THE FAILURE WAS WORSE THAN AN ERROR, WHICH IS WHY IT SURVIVED SO LONG. Installing the .ipk
+# BY PATH says "Malformed package file" and stops. Installing the same package FROM A FEED prints
+# "Installing… Configuring… Database update completed", exits 0, registers the package, writes a
+# ZERO-BYTE file list and unpacks NOTHING. A router is then "running 0.14.5" by `opkg list-installed`
+# while every file on disk is whatever was there before. Both known routers were installed by hand
+# copy, so nobody ever hit the honest error.
+#
+# Still no toolchain: tar and gzip only, exactly as before.
+( cd "$WORK" && tar $TAR_OPTS -czf "$IPK" ./debian-binary ./control.tar.gz ./data.tar.gz )
 
-printf '!<arch>\n' > "$IPK"
-( cd "$WORK" && ar_add "$IPK" debian-binary && ar_add "$IPK" control.tar.gz && ar_add "$IPK" data.tar.gz )
-
-# Sanity-check the sealed archive with no external tools.
-[ "$(head -c 8 "$IPK")" = "!<arch>" ] || { echo "not an ar archive" >&2; exit 1; }
+# Sanity-check the sealed archive. The old check asserted the WRONG format and passed every time —
+# a gate that confirms a mistake is worse than no gate, so this one verifies what opkg actually
+# needs: gzip magic, and all three members present under the ./ prefix a real .ipk uses.
+[ "$(dd if="$IPK" bs=1 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "1f8b" ] \
+  || { echo "not a gzip — an .ipk is a tar.gz, not an ar archive" >&2; exit 1; }
+for _m in ./debian-binary ./control.tar.gz ./data.tar.gz; do
+  tar tzf "$IPK" | grep -qx "$_m" || { echo "sealed package is missing $_m" >&2; exit 1; }
+done
+# busybox tar chokes on pax headers and AppleDouble; catch them here, not on a router.
+for _a in "$IPK" "$WORK/data.tar.gz" "$WORK/control.tar.gz"; do
+  tar tzf "$_a" | grep -qE 'PaxHeader|/\._|^\./\._' && { echo "archive $_a carries pax/AppleDouble entries busybox tar cannot read" >&2; exit 1; }
+done
 [ "$(wc -c < "$IPK" | tr -d ' ')" -gt 2000 ] || { echo "package suspiciously small" >&2; exit 1; }
 
 echo "built $IPK"
