@@ -147,6 +147,43 @@ Function StartupPageLeave
   ; used to) silently ignored a user who unchecked the tray but left auto-start on — the common case.
 FunctionEnd
 
+; Re-register ${SERVICE_NAME} after an abort that happened BEFORE the service was created.
+;
+; 🔴 THE GAP THIS CLOSES. `RestoreLegacyHub` below only knows the OLD service name, which covers a
+; machine upgrading from the pre-2026-09-02 identity. It does nothing for the ordinary case: a
+; machine already running ${SERVICE_NAME} that is simply taking a newer build. That machine has its
+; service DELETED above (unavoidable — `sc create` fails 1073 on an existing name, there is no
+; replace), so an abort between that delete and the create leaves it with nothing. CENTRAL is
+; exactly such a machine today.
+;
+; Safe because of WHEN it is called: only from `hub_locked`, i.e. `File` failed, which means the
+; PREVIOUS binary is still on disk untouched. Re-registering points the service back at a working
+; hub, not at a half-written one. It is deliberately NOT called from the post-create self-check
+; failure, where the binary is new and the reason for failure is unknown.
+;
+; $StartMode is not assigned until after the `File`, so it cannot be used here — the start type is
+; derived from $AutoStart directly.
+Function RestoreCurrentHub
+  Push $0
+  Push $1
+  ${If} ${FileExists} "$INSTDIR\bin\brvg-hub.exe"
+    ${If} $AutoStart == "1"
+      StrCpy $1 "auto"
+    ${Else}
+      StrCpy $1 "demand"
+    ${EndIf}
+    nsExec::ExecToLog 'sc.exe create "${SERVICE_NAME}" binPath= "\$\"$INSTDIR\bin\brvg-hub.exe\$\" --service" start= $1 DisplayName= "${HUB_NAME}"'
+    Pop $0
+    ${If} $0 == 0
+      nsExec::ExecToLog 'sc.exe start "${SERVICE_NAME}"'
+      Pop $0
+      DetailPrint "The hub that was already installed has been re-registered and restarted."
+    ${EndIf}
+  ${EndIf}
+  Pop $1
+  Pop $0
+FunctionEnd
+
 ; Put the PREVIOUS hub back after a failed upgrade.
 ;
 ; Every abort path in the install section calls this. We stop the legacy service on the way in to
@@ -290,6 +327,9 @@ Section "Hub" SecHub
     ; complete the upgrade, the machine must be left as we found it — running the hub it had —
     ; rather than stopped. Best-effort and silent: on a machine that never had a legacy service
     ; this is a no-op, and its failure must not mask the real error being reported.
+    ; Both, in the order that matters: this machine may have been running EITHER identity, and
+    ; whichever it was must come back. Each is a no-op when it does not apply.
+    Call RestoreCurrentHub
     Call RestoreLegacyHub
     SetErrorLevel 2
     Abort "A hub is still running and its program file could not be replaced. Stop it and run this installer again.$\r$\nThe hub that was already installed has been left running."
