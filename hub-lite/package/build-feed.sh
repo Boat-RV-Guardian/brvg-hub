@@ -50,26 +50,19 @@ sha256_of() {
 # Pull the control fields back out of each package so the index cannot drift from what shipped.
 # (The control member is the second ar member; extracting it without `ar` keeps this script's
 # no-toolchain promise, same as build-ipk.sh.)
+# An .ipk is a GZIPPED TAR (see build-ipk.sh — .deb is ar, .ipk is not), so pulling the control
+# file out is two tar calls. This used to hand-walk 60-byte `ar` member headers, which matched the
+# packages this repo built and NOTHING opkg could install; against a real .ipk it read gzip bytes as
+# a decimal size and died with "Illegal number".
 extract_control() {
   _ipk="$1"
   _tmp="$2"
-  # Skip the 8-byte "!<arch>\n" magic, then walk 60-byte member headers.
-  _off=8
-  while :; do
-    _hdr=$(dd if="$_ipk" bs=1 skip="$_off" count=60 2>/dev/null | tr -d '\0')
-    [ -n "$_hdr" ] || return 1
-    _name=$(printf '%s' "$_hdr" | cut -c1-16 | tr -d ' ')
-    _size=$(printf '%s' "$_hdr" | cut -c49-58 | tr -d ' ')
-    [ -n "$_size" ] || return 1
-    _data=$(( _off + 60 ))
-    if [ "$_name" = "control.tar.gz" ]; then
-      dd if="$_ipk" bs=1 skip="$_data" count="$_size" 2>/dev/null > "$_tmp/control.tar.gz"
-      ( cd "$_tmp" && tar xzf control.tar.gz ./control 2>/dev/null || tar xzf control.tar.gz control 2>/dev/null )
-      return 0
-    fi
-    _pad=$(( _size % 2 ))
-    _off=$(( _data + _size + _pad ))
-  done
+  tar xzf "$_ipk" -C "$_tmp" ./control.tar.gz 2>/dev/null \
+    || tar xzf "$_ipk" -C "$_tmp" control.tar.gz 2>/dev/null \
+    || return 1
+  ( cd "$_tmp" && { tar xzf control.tar.gz ./control 2>/dev/null || tar xzf control.tar.gz control 2>/dev/null; } )
+  [ -f "$_tmp/control" ] || [ -f "$_tmp/./control" ] || return 1
+  return 0
 }
 
 for ipk in "$DIST"/*.ipk; do
