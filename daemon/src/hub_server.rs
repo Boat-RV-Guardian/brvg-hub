@@ -25,6 +25,7 @@
 // sync loop's cadence is the revocation latency until it lands.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -154,7 +155,7 @@ pub fn may_control(role: &str) -> bool {
 /// the same `/api/agent` ingest as the router agent and the worker classifies it as telemetry,
 /// never an alert. The only place the hub token meets a URL.
 pub fn heartbeat_url(
-    worker_base: &str, cfg: &HubConfig, ver: &str, platform: &str, update: Option<&str>,
+    worker_base: &str, cfg: &HubConfig, ver: &str, platform: &str, update: Option<&str>, ack: Option<&str>,
 ) -> Result<String, String> {
     let base = worker_base.trim_end_matches('/');
     let mut u = url::Url::parse(&format!("{base}/api/agent")).map_err(|e| e.to_string())?;
@@ -172,11 +173,17 @@ pub fn heartbeat_url(
     if let Some(v) = update.filter(|v| !v.is_empty()) {
         u.query_pairs_mut().append_pair("update", v);
     }
+    // Commands this hub has handled and is acknowledging so the worker prunes them from the queue
+    // (agentCommands.ackCommands parses this same comma-separated `ack`). The router agent uses the
+    // identical param; the daemon simply never did until it learned to act on commands.
+    if let Some(a) = ack.filter(|a| !a.is_empty()) {
+        u.query_pairs_mut().append_pair("ack", a);
+    }
     Ok(u.to_string())
 }
 
 pub async fn send_heartbeat_once(client: &reqwest::Client, worker_base: &str, cfg: &HubConfig) -> Result<(), String> {
-    let url = heartbeat_url(worker_base, cfg, env!("CARGO_PKG_VERSION"), std::env::consts::OS, None)?;
+    let url = heartbeat_url(worker_base, cfg, env!("CARGO_PKG_VERSION"), std::env::consts::OS, None, None)?;
     let res = client.get(url).send().await.map_err(|e| e.without_url().to_string())?;
     if res.status().is_success() {
         Ok(())
@@ -273,6 +280,15 @@ pub struct Rt {
     /// nap and beats NOW (in ACTIVE cadence) instead of after the current — possibly 20-minute —
     /// interval. This is what makes quiet-mode backoff free of latency: the alarm path wakes it.
     pub wake: tokio::sync::Notify,
+    /// Command ids this PROCESS has already acted on, so a command still in the queue (waiting for
+    /// its ack to be read) is not run a second time. In-memory and bounded — forgetting an id is
+    /// harmless (at worst one extra up-to-date check). See handle_agent_commands.
+    pub handled_cmds: tokio::sync::Mutex<HashSet<String>>,
+    /// Command ids to acknowledge on the next heartbeat (`?ack=`), so the worker prunes them from
+    /// the queue. An id lands here only once this hub has reached a TERMINAL decision about the
+    /// command; a self-update that actually swaps restarts BEFORE acking, on purpose (see
+    /// run_commanded_self_update), so a crash mid-update leaves the command to be retried.
+    pub pending_acks: tokio::sync::Mutex<Vec<String>>,
 }
 
 /// Record that something happened locally and wake the heartbeat to report it immediately.
@@ -298,6 +314,8 @@ pub fn new_rt(base: PathBuf, worker_base: String) -> Shared {
         update_available: tokio::sync::RwLock::new(None),
         last_activity_ms: AtomicI64::new(now_ms()),
         wake: tokio::sync::Notify::new(),
+        handled_cmds: tokio::sync::Mutex::new(HashSet::new()),
+        pending_acks: tokio::sync::Mutex::new(Vec::new()),
     })
 }
 
@@ -1249,9 +1267,21 @@ async fn heartbeat_loop(rt: Shared) {
         let cfg = hub_config::read_config_in(&rt.base);
         if !cfg.token.is_empty() && !cfg.vid.is_empty() && cfg.enabled {
             let update = rt.update_available.read().await.clone();
-            match heartbeat_with_reply(&client, &rt.worker_base, &cfg, update.as_deref()).await {
-                Ok(body) => apply_linktap_reply(&rt, &body).await,
-                Err(e) => crate::hlog!("hub: heartbeat failed: {e}"),
+            // Acks owed from earlier beats. TAKEN, not copied: a successful beat drops them (the
+            // worker has pruned them), a failed one puts them back to retry.
+            let sending: Vec<String> = std::mem::take(&mut *rt.pending_acks.lock().await);
+            let ack = if sending.is_empty() { None } else { Some(sending.join(",")) };
+            match heartbeat_with_reply(&client, &rt.worker_base, &cfg, update.as_deref(), ack.as_deref()).await {
+                Ok(body) => {
+                    apply_linktap_reply(&rt, &body).await;
+                    handle_agent_commands(&rt, &client, &body).await;
+                }
+                Err(e) => {
+                    if !sending.is_empty() {
+                        rt.pending_acks.lock().await.extend(sending);
+                    }
+                    crate::hlog!("hub: heartbeat failed: {e}");
+                }
             }
             // Report-by-exception cadence: fast right after a local event, the configured beat while
             // things are recent, one beat every 20 min once idle. A local event mid-nap rings
@@ -1296,11 +1326,76 @@ async fn update_check_loop(rt: Shared) {
     }
 }
 
+/// PURE: the (id, verb) pairs a heartbeat reply carried. A command with no id can never be
+/// acknowledged — it would loop forever — so it is dropped rather than run.
+fn parse_agent_commands(body: &serde_json::Value) -> Vec<(String, String)> {
+    body.get("commands").and_then(|c| c.as_array()).map(|arr| {
+        arr.iter().filter_map(|c| {
+            let id = c.get("id")?.as_str()?;
+            let cmd = c.get("cmd")?.as_str()?;
+            if id.is_empty() || cmd.is_empty() { return None; }
+            Some((id.to_string(), cmd.to_string()))
+        }).collect()
+    }).unwrap_or_default()
+}
+
+/// Act on the console-queued commands a heartbeat reply carried.
+///
+/// 🔴 THIS IS THE ONLY WRITE-CAPABLE CLOUD CHANNEL INTO THE DAEMON, and its scope is exactly one
+/// verb: install the vendor-signed newer release. The command is a fixed verb with NO ARGUMENT —
+/// the cloud decides WHO updates and WHEN, `perform_update` decides WHAT (the latest release,
+/// verified against the SHA256SUMS published in that same release). Compromising the command queue
+/// changes an update's TIMING, never its CONTENTS. Never add a verb that carries a version or URL.
+///
+/// At-least-once, and the daemon side of that contract mirrors the router agent's: a command stays
+/// queued until this hub acks it, and it is acked only after a terminal decision.
+async fn handle_agent_commands(rt: &Rt, client: &reqwest::Client, body: &serde_json::Value) {
+    for (id, cmd) in parse_agent_commands(body) {
+        if !rt.handled_cmds.lock().await.insert(id.clone()) { continue; }
+        match cmd.as_str() {
+            "self_update" => run_commanded_self_update(rt, client, &id).await,
+            other => {
+                crate::hlog!("hub: unsupported cloud command '{other}' (id {id}) - acknowledging");
+                rt.pending_acks.lock().await.push(id);
+            }
+        }
+    }
+    let mut h = rt.handled_cmds.lock().await;
+    if h.len() > 256 { h.clear(); }
+}
+
+/// Run `self_update` from a cloud command. Same body as do_update (the LAN button) minus the
+/// caller-role check — a queued command already cleared the operator-console capability gate
+/// cloud-side, which is a stronger bar than a LAN member key.
+async fn run_commanded_self_update(rt: &Rt, client: &reqwest::Client, id: &str) {
+    match crate::self_update::perform_update(client).await {
+        crate::self_update::UpdateOutcome::Swapped { to_version } => {
+            // 🔴 DO NOT ACK HERE. Restart first; the restarted binary re-runs this same still-queued
+            // command, finds itself already current, and acks then. That is what makes a swap+restart
+            // idempotent — a missed ack costs one extra up-to-date check, never a second install.
+            // Ordering copied verbatim from do_update.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let _restarting = crate::self_update::finalize_restart();
+            crate::hlog!("hub: cloud self-update installed {to_version}; restarting into it");
+            #[cfg(unix)]
+            std::process::exit(0);
+        }
+        crate::self_update::UpdateOutcome::UpToDate => {
+            crate::hlog!("hub: cloud self-update - already current; acknowledging");
+            rt.pending_acks.lock().await.push(id.to_string());
+        }
+        crate::self_update::UpdateOutcome::Failed(why) => {
+            crate::hlog!("hub: cloud self-update failed: {why}; acknowledging");
+            rt.pending_acks.lock().await.push(id.to_string());
+        }
+    }
+}
+
 /// The heartbeat, keeping its reply — the config-as-state channel (cloud-server #105 attaches
 /// `{linktap:{allowed,profiles}}` to a hub's report). send_heartbeat_once stays for callers that
 /// only care whether it landed.
-async fn heartbeat_with_reply(client: &reqwest::Client, worker_base: &str, cfg: &HubConfig, update: Option<&str>) -> Result<serde_json::Value, String> {
-    let url = heartbeat_url(worker_base, cfg, env!("CARGO_PKG_VERSION"), std::env::consts::OS, update)?;
+async fn heartbeat_with_reply(client: &reqwest::Client, worker_base: &str, cfg: &HubConfig, update: Option<&str>, ack: Option<&str>) -> Result<serde_json::Value, String> {
+    let url = heartbeat_url(worker_base, cfg, env!("CARGO_PKG_VERSION"), std::env::consts::OS, update, ack)?;
     let res = client.get(url).send().await.map_err(|e| e.without_url().to_string())?;
     if !res.status().is_success() {
         return Err(format!("HTTP {}", res.status().as_u16()));
@@ -2142,9 +2237,36 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_url_carries_acks_and_omits_an_empty_one() {
+        let cfg = seeded_cfg();
+        let some = url::Url::parse(&heartbeat_url("https://w.example", &cfg, "0.3.30", "linux", None, Some("a1,b2")).unwrap()).unwrap();
+        let q: std::collections::HashMap<_, _> = some.query_pairs().into_owned().collect();
+        assert_eq!(q.get("ack").map(String::as_str), Some("a1,b2"));
+        let none = url::Url::parse(&heartbeat_url("https://w.example", &cfg, "0.3.30", "linux", None, Some("")).unwrap()).unwrap();
+        assert!(!none.query_pairs().any(|(k, _)| k == "ack"), "empty ack must be omitted, like update");
+    }
+
+    #[test]
+    fn parse_agent_commands_keeps_only_well_formed_pairs() {
+        let body = serde_json::json!({ "commands": [
+            { "id": "x1", "cmd": "self_update" },
+            { "id": "", "cmd": "self_update" },
+            { "cmd": "self_update" },
+            { "id": "x2" },
+            { "id": "x3", "cmd": "rollback_agent" }
+        ]});
+        assert_eq!(
+            parse_agent_commands(&body),
+            vec![("x1".to_string(), "self_update".to_string()), ("x3".to_string(), "rollback_agent".to_string())]
+        );
+        assert!(parse_agent_commands(&serde_json::json!({})).is_empty());
+        assert!(parse_agent_commands(&serde_json::json!({ "commands": "nope" })).is_empty());
+    }
+
+    #[test]
     fn the_heartbeat_is_a_hub_measurement_on_the_agent_wire() {
         let cfg = seeded_cfg();
-        let u = url::Url::parse(&heartbeat_url("https://w.example/", &cfg, "1.0.82", "windows", None).unwrap()).unwrap();
+        let u = url::Url::parse(&heartbeat_url("https://w.example/", &cfg, "1.0.82", "windows", None, None).unwrap()).unwrap();
         assert_eq!(u.path(), "/api/agent"); // same ingest as the router agent
         let q: HashMap<_, _> = u.query_pairs().into_owned().collect();
         assert_eq!(q["vid"], "v1");
@@ -2161,10 +2283,10 @@ mod tests {
     fn the_heartbeat_carries_an_update_marker_only_when_one_exists() {
         let cfg = seeded_cfg();
         // No update → no param (also covers an empty string being treated as none).
-        let none = url::Url::parse(&heartbeat_url("https://w.example", &cfg, "0.3.23", "linux", Some("")).unwrap()).unwrap();
+        let none = url::Url::parse(&heartbeat_url("https://w.example", &cfg, "0.3.23", "linux", Some(""), None).unwrap()).unwrap();
         assert!(!none.query_pairs().any(|(k, _)| k == "update"));
         // A newer release → the version rides the heartbeat, so the fleet console reads it flat.
-        let some = url::Url::parse(&heartbeat_url("https://w.example", &cfg, "0.3.23", "linux", Some("0.3.24")).unwrap()).unwrap();
+        let some = url::Url::parse(&heartbeat_url("https://w.example", &cfg, "0.3.23", "linux", Some("0.3.24"), None).unwrap()).unwrap();
         let q: HashMap<_, _> = some.query_pairs().into_owned().collect();
         assert_eq!(q["update"], "0.3.24");
     }
@@ -2172,7 +2294,7 @@ mod tests {
     #[test]
     fn a_hub_name_with_spaces_and_symbols_cannot_break_the_query() {
         let cfg = HubConfig { name: "Jon's boat & RV=hub".into(), ..seeded_cfg() };
-        let raw = heartbeat_url("https://w.example", &cfg, "1.0.82", "macos", None).unwrap();
+        let raw = heartbeat_url("https://w.example", &cfg, "1.0.82", "macos", None, None).unwrap();
         assert!(!raw.contains("boat & RV"), "the name must be encoded: {raw}");
         let q: HashMap<_, _> = url::Url::parse(&raw).unwrap().query_pairs().into_owned().collect();
         assert_eq!(q["name"], "Jon's boat & RV=hub");
