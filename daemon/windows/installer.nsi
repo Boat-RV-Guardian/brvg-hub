@@ -37,6 +37,17 @@ Unicode true
 ;   * SERVICE_NAME in the APP's dashboard/src-tauri/src/hub_service.rs -- that is what `sc query`s
 ;     to draw the Hub screen. Wrong here and the app manages a service the daemon never answers.
 !define SERVICE_NAME "DockNeighborHub"
+
+; The hub's version, for the Programs-and-Features entry. PASSED IN AT BUILD TIME from
+; daemon/Cargo.toml (`makensis -DHUB_VERSION=...`), never written here: a second copy of a version
+; number is a second thing to forget, and this file has no way to be right about it on its own.
+;
+; The fallback exists for the ci.yml gate, which compiles this script WITHOUT the define to prove it
+; parses. It is deliberately not a plausible version — if "0.0.0-dev" ever reaches a real installer,
+; the release workflow failed to pass the define and that should be obvious rather than subtle.
+!ifndef HUB_VERSION
+  !define HUB_VERSION "0.0.0-dev"
+!endif
 !define SERVICE_DESC "Carries this vehicle's local work - gateway telemetry, local control and cloud reporting - even when nobody is signed in."
 
 ; The scheduled task this installer used to create, kept ONLY so an upgrade removes it. A machine
@@ -551,6 +562,10 @@ Section "Hub" SecHub
 
   WriteUninstaller "$INSTDIR\uninstall-hub.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}" "DisplayName" "${HUB_NAME}"
+  ; Programs and Features showed this entry with a BLANK version — observed on CENTRAL after the
+  ; 0.3.28 install. Every other field was written; this one was simply never set, so the one thing
+  ; an operator looks at to answer "which hub is on this machine?" was empty.
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}" "DisplayVersion" "${HUB_VERSION}"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}" "UninstallString" '"$INSTDIR\uninstall-hub.exe"'
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}" "Publisher" "SC4 Tech"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${SERVICE_NAME}" "InstallLocation" "$INSTDIR"
