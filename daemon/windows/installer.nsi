@@ -9,9 +9,9 @@
 ; standalone and bundled paths cannot drift into asking it differently.
 ;
 ; SILENT USE (what the app's installer and the app's Hub screen drive):
-;   brvg-hub-setup.exe /S              -> install, auto-start ON  (the sane default for a boat)
-;   brvg-hub-setup.exe /S /MANUAL      -> install, auto-start OFF (installed but not at boot)
-;   brvg-hub-setup.exe /S /UNINSTALL   -> remove service, binary and config
+;   brvg-hub-windows-setup.exe /S              -> install, auto-start ON  (the sane default for a boat)
+;   brvg-hub-windows-setup.exe /S /MANUAL      -> install, auto-start OFF (installed but not at boot)
+;   brvg-hub-windows-setup.exe /S /UNINSTALL   -> remove service, binary and config
 ;   ... add /NOTRAY to any install to leave the notification-area monitor out
 ;
 ; EXIT CODES (the app branches on these, so do not renumber):
