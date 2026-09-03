@@ -79,8 +79,24 @@ cat > "$WORK/control/postinst" <<'EOF'
 # installing the hub-lite, so a failure here is logged and swallowed rather than failing the
 # package.
 [ -x /usr/libexec/brvg-hub-lite/feed-setup ] && { /usr/libexec/brvg-hub-lite/feed-setup || echo "BRVG_FEED_SETUP_SKIPPED"; }
-# Deliberately NOT started here: without a config it would loop on a fatal error. The app starts it
-# after writing the configuration.
+# 🔴 AN UPGRADE MUST NOT LEAVE A ROUTER WITH ITS COLLECTOR STOPPED.
+#
+# prerm stops and disables the service, so on an `opkg upgrade` the sequence is stop -> unpack ->
+# postinst, and this script used to end without ever starting it again. Measured on sc4-lab
+# 2026-09-03: a clean feed upgrade 0.14.5 -> 0.14.6 succeeded in every other respect and left
+# hub-lite NOT RUNNING. It would have come back at the next reboot, which on a boat could be weeks
+# of silence, reported by nothing.
+#
+# The original reason for not starting is real and is preserved as the CONDITION rather than
+# dropped: on a FRESH install there is no config yet, and starting would loop on a fatal error
+# ("VID and DEVICE_ID are required"). So start only when this router already has a usable config —
+# which is exactly the upgrade case, and never the fresh-install one. The app still starts it after
+# writing the configuration on a first-time enrollment.
+if [ -f /etc/brvg-hub-lite.conf ] \
+   && grep -qE '^VID="[^"]+"' /etc/brvg-hub-lite.conf \
+   && grep -qE '^DEVICE_ID="[^"]+"' /etc/brvg-hub-lite.conf; then
+  /etc/init.d/brvg-hub-lite start 2>/dev/null || echo "BRVG_START_FAILED"
+fi
 exit 0
 EOF
 chmod 0755 "$WORK/control/postinst"
